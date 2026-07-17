@@ -231,6 +231,10 @@ namespace crypto {
    */
   bool check_key(const public_key &key);
 
+  /* Check an asset key. Returns true if it is valid, false otherwise.
+   */
+  bool check_asset_key(const asset_id &key);
+
   /* Checks a private key and computes the corresponding public key.
    */
   bool secret_key_to_public_key(const secret_key &sec, public_key &pub);
@@ -368,7 +372,6 @@ CRYPTO_MAKE_HASHABLE(key_image)
 CRYPTO_MAKE_HASHABLE(signature)
 CRYPTO_MAKE_HASHABLE(ed25519_public_key)
 CRYPTO_MAKE_HASHABLE(x25519_public_key)
-CRYPTO_MAKE_HASHABLE(asset_id)
 // eth/eddsa owner-key & signature types: comparable (needed for variant
 // equality and serialization round-trip tests) but not hashable — eth_public_key
 // is 33 bytes / 1-byte aligned and can't satisfy the hash alignment requirement,
@@ -377,3 +380,4 @@ CRYPTO_MAKE_COMPARABLE(eth_public_key)
 CRYPTO_MAKE_COMPARABLE(eth_signature)
 CRYPTO_MAKE_COMPARABLE(eddsa_public_key)
 CRYPTO_MAKE_COMPARABLE(eddsa_signature)
+CRYPTO_MAKE_HASHABLE(asset_id)

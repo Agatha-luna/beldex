@@ -881,13 +881,14 @@ namespace cryptonote
     {
       std::string keystr;
       bool r = tools::slurp_file(keypath, keystr);
-      memcpy(&unwrap(unwrap(privkey)), keystr.data(), sizeof(privkey));
-      memwipe(&keystr[0], keystr.size());
       CHECK_AND_ASSERT_MES(r, false, "failed to load master node key from " + keypath.u8string());
-      CHECK_AND_ASSERT_MES(keystr.size() == sizeof(privkey), false,
-          "master node key file " + keypath.u8string() + " has an invalid size");
+      CHECK_AND_ASSERT_MES(keystr.size() == sizeof(privkey), false, "master node key file " + keypath.u8string() + " has an invalid size");
+      
+      memcpy(&unwrap(unwrap(privkey)), keystr.data(), sizeof(privkey));
 
       r = get_pubkey(privkey, pubkey);
+
+      memwipe(&keystr[0], keystr.size());
       CHECK_AND_ASSERT_MES(r, false, "failed to generate pubkey from secret key");
     }
     else
@@ -1654,14 +1655,15 @@ namespace cryptonote
 
     if (tx.version >= txversion::v2_ringct)
     {
-      // Gateway deposit outputs (tx_out_gateway, HF22) are transparent and are not
-      // part of the confidential RCT outputs, so outPk covers the RCT
-      // (txout_to_key) outputs only. Compare against that count, not vout.size().
-      size_t rct_outputs = 0;
-      for (const auto& o : tx.vout)
-        if (!std::holds_alternative<tx_out_gateway>(o.target))
-          ++rct_outputs;
-      if (tx.rct_signatures.outPk.size() != rct_outputs)
+      // Gateway deposit outputs (tx_out_gateway, HF22) are transparent and
+      // confidential-asset zarcanum outputs (tx_out_zarcanum, HF23) carry their
+      // own commitments in asset_proofs, so neither is part of the RCT outPk
+      // array. outPk covers the native (txout_to_key) outputs only; count those.
+      const size_t native_outputs = std::count_if(tx.vout.begin(), tx.vout.end(), [](const tx_out& out) {
+        return !std::holds_alternative<tx_out_gateway>(out.target) &&
+               !std::holds_alternative<tx_out_zarcanum>(out.target);
+      });
+      if (tx.rct_signatures.outPk.size() != native_outputs)
       {
         MERROR_VER("tx with mismatched vout/outPk count, rejected for tx id= " << get_transaction_hash(tx));
         return false;
@@ -1924,8 +1926,7 @@ namespace cryptonote
     for(const auto& in: tx.vin)
     {
       if (std::holds_alternative<txin_gateway>(in)) continue; // HF22: no key image
-      CHECKED_GET_SPECIFIC_VARIANT(in, txin_to_key, tokey_in, false);
-      if(!ki.insert(tokey_in.k_image).second)
+      if(!ki.insert(get_input_key_image(in)).second)
         return false;
     }
     return true;
@@ -1936,9 +1937,16 @@ namespace cryptonote
     for(const auto& in: tx.vin)
     {
       if (std::holds_alternative<txin_gateway>(in)) continue; // HF22: no ring members
-      CHECKED_GET_SPECIFIC_VARIANT(in, txin_to_key, tokey_in, false);
-      for (size_t n = 1; n < tokey_in.key_offsets.size(); ++n)
-        if (tokey_in.key_offsets[n] == 0)
+      const std::vector<uint64_t>* key_offsets = nullptr;
+      if (const auto* tokey_in = std::get_if<txin_to_key>(&in))
+        key_offsets = &tokey_in->key_offsets;
+      else if (const auto* zc_in = std::get_if<txin_zc_input>(&in))
+        key_offsets = &zc_in->key_offsets;
+      else
+        return false;
+
+      for (size_t n = 1; n < key_offsets->size(); ++n)
+        if ((*key_offsets)[n] == 0)
           return false;
     }
 
@@ -1951,8 +1959,7 @@ namespace cryptonote
     for(const auto& in: tx.vin)
     {
       if (std::holds_alternative<txin_gateway>(in)) continue; // HF22: no key image
-      CHECKED_GET_SPECIFIC_VARIANT(in, txin_to_key, tokey_in, false);
-      if (!(rct::scalarmultKey(rct::ki2rct(tokey_in.k_image), rct::curveOrder()) == rct::identity()))
+      if (!(rct::scalarmultKey(rct::ki2rct(get_input_key_image(in)), rct::curveOrder()) == rct::identity()))
         return false;
     }
     return true;
@@ -2109,9 +2116,10 @@ namespace cryptonote
     return m_blockchain_storage.get_outs(req, res);
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::get_output_distribution(uint64_t amount, uint64_t from_height, uint64_t to_height, uint64_t &start_height, std::vector<uint64_t> &distribution, uint64_t &base) const
+  bool core::get_output_distribution(uint64_t amount, uint64_t from_height, uint64_t to_height, uint64_t &start_height, std::vector<uint64_t> &distribution, uint64_t &base,
+      output_distribution_type otype, std::vector<uint64_t> *output_indices) const
   {
-    return m_blockchain_storage.get_output_distribution(amount, from_height, to_height, start_height, distribution, base);
+    return m_blockchain_storage.get_output_distribution(amount, from_height, to_height, start_height, distribution, base, otype, output_indices);
   }
   //-----------------------------------------------------------------------------------------------
   void core::get_output_blacklist(std::vector<uint64_t> &blacklist) const

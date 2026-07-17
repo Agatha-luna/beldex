@@ -29,6 +29,7 @@
 // 
 // Parts of this file are originally copyright (c) 2012-2013 The Cryptonote developers
 
+#include <algorithm>
 #include <atomic>
 #include <boost/algorithm/string.hpp>
 #include <limits>
@@ -45,6 +46,8 @@
 #include "cryptonote_config.h"
 #include "crypto/crypto.h"
 #include "crypto/hash.h"
+#include "crypto/keccak.h"
+#include "ringct/rctOps.h"
 #include "ringct/rctSigs.h"
 #include "cryptonote_basic/verification_context.h"
 #include "cryptonote_core/master_node_voting.h"
@@ -133,9 +136,10 @@ namespace cryptonote
       if (rv.type == rct::RCTType::Null)
         return true;
       // Gateway deposit outputs (tx_out_gateway, HF22) are transparent and carry
-      // no RCT commitment, so outPk covers the RCT (txout_to_key) outputs only.
-      // They are constructed last in vout, so the first outPk.size() outputs are
-      // exactly the RCT ones.
+      // no RCT commitment, and confidential-asset zarcanum outputs
+      // (tx_out_zarcanum, HF23) carry their own commitments in asset_proofs, so
+      // outPk covers the RCT (txout_to_key) outputs only. Counting txout_to_key
+      // excludes both non-RCT output kinds.
       size_t rct_output_count = 0;
       for (const auto& o : tx.vout)
         if (std::holds_alternative<txout_to_key>(o.target))
@@ -145,14 +149,22 @@ namespace cryptonote
         LOG_PRINT_L1("Failed to parse transaction from blob, bad outPk size in tx " << get_transaction_hash(tx));
         return false;
       }
-      for (size_t n = 0; n < tx.rct_signatures.outPk.size(); ++n)
+      size_t rct_output_index = 0;
+      for (size_t n = 0; n < tx.vout.size(); ++n)
       {
+        // tx_out_zarcanum outputs carry their own amount commitment, and
+        // tx_out_gateway (HF22 deposit) outputs are transparent with no RCT
+        // commitment; neither contributes to the legacy outPk vector, so skip
+        // them here (they are also excluded from rct_output_count above).
+        if (std::holds_alternative<tx_out_zarcanum>(tx.vout[n].target) ||
+            std::holds_alternative<tx_out_gateway>(tx.vout[n].target))
+          continue;
         if (!std::holds_alternative<txout_to_key>(tx.vout[n].target))
         {
           LOG_PRINT_L1("Unsupported output type in tx " << get_transaction_hash(tx));
           return false;
         }
-        rv.outPk[n].dest = rct::pk2rct(var::get<txout_to_key>(tx.vout[n].target).key);
+        rv.outPk[rct_output_index++].dest = rct::pk2rct(var::get<txout_to_key>(tx.vout[n].target).key);
       }
 
       if (!base_only)
@@ -173,7 +185,7 @@ namespace cryptonote
             return false;
           }
           const size_t max_outputs = rct::n_bulletproof_plus_max_amounts(rv.p.bulletproofs_plus[0]);
-          if (max_outputs < rv.outPk.size()) // RCT outputs only (gateway outputs excluded)
+          if (max_outputs < rv.outPk.size()) // RCT outputs only (gateway + zarcanum outputs excluded)
           {
             LOG_PRINT_L1("Failed to parse transaction from blob, bad bulletproofs_plus max outputs in tx " << get_transaction_hash(tx));
             return false;
@@ -197,7 +209,7 @@ namespace cryptonote
             return false;
           }
           const size_t max_outputs = 1 << (rv.p.bulletproofs[0].L.size() - 6);
-          if (max_outputs < rv.outPk.size()) // RCT outputs only (gateway outputs excluded)
+          if (max_outputs < rv.outPk.size()) // RCT outputs only (gateway + zarcanum outputs excluded)
           {
             LOG_PRINT_L1("Failed to parse transaction from blob, bad bulletproofs max outputs in tx " << get_transaction_hash(tx));
             return false;
@@ -1002,6 +1014,19 @@ namespace cryptonote
     return result;
   }
   //---------------------------------------------------------------
+  bool add_asset_descriptor_operation_to_tx_extra(std::vector<uint8_t>& tx_extra, const tx_extra_asset_descriptor_operation& op)
+  {
+    tx_extra_field field = op;
+    bool result = add_tx_extra_field_to_tx_extra(tx_extra, field);
+    CHECK_AND_NO_ASSERT_MES_L1(result, false, "failed to serialize tx extra asset descriptor operation");
+    return result;
+  }
+  //---------------------------------------------------------------
+  bool get_asset_descriptor_operation_from_tx_extra(const std::vector<uint8_t>& tx_extra, tx_extra_asset_descriptor_operation& op, size_t skip)
+  {
+    return get_field_from_tx_extra(tx_extra, op, skip);
+  }
+  //---------------------------------------------------------------
   bool get_inputs_money_amount(const transaction& tx, uint64_t& money)
   {
     money = 0;
@@ -1022,14 +1047,25 @@ namespace cryptonote
     return coinbase_in.height;
   }
   //---------------------------------------------------------------
+  const crypto::key_image& get_input_key_image(const txin_v& in)
+  {
+    if (const auto* tokey_in = std::get_if<txin_to_key>(&in))
+      return tokey_in->k_image;
+    if (const auto* zc_in = std::get_if<txin_zc_input>(&in))
+      return zc_in->k_image;
+    throw std::runtime_error("get_input_key_image: unexpected txin_v variant: " + std::string(tools::type_name(tools::variant_type(in))));
+  }
+  //---------------------------------------------------------------
   bool check_inputs_types_supported(const transaction& tx)
   {
     for(const auto& in: tx.vin)
     {
-      // Gateway withdrawal inputs (txin_gateway, HF22) are a valid input type;
-      // they carry no ring/key image and are validated (owner signature,
-      // balance) in gateway_utils rather than via the ring machinery.
-      if (std::holds_alternative<txin_gateway>(in))
+      // Gateway withdrawal inputs (txin_gateway, HF22) and confidential asset
+      // inputs (txin_zc_input, HF23) are valid input types; they carry no
+      // ring/key image and are validated by their own proofs (gateway_utils
+      // owner signature/balance; ZC_sig/asset proofs) rather than via the ring
+      // machinery, so they're exempt from the legacy txin_to_key-only check.
+      if (std::holds_alternative<txin_gateway>(in) || std::holds_alternative<txin_zc_input>(in))
         continue;
 
       CHECK_AND_ASSERT_MES(std::holds_alternative<txin_to_key>(in), false, "wrong variant type: "
@@ -1059,6 +1095,28 @@ namespace cryptonote
       if (std::holds_alternative<tx_out_gateway>(out.target))
         continue;
 
+      if (std::holds_alternative<tx_out_zarcanum>(out.target))
+      {
+        // Confidential asset output (HF23+): stealth_address must be a valid key.
+        const auto& zout = var::get<tx_out_zarcanum>(out.target);
+        CHECK_AND_ASSERT_MES(check_key(zout.stealth_address), false,
+          "invalid stealth_address in tx_out_zarcanum, tx id=" << get_transaction_hash(tx));
+        CHECK_AND_ASSERT_MES(check_asset_key(zout.blinded_asset_id), false,
+          "invalid blinded_asset_id in tx_out_zarcanum, tx id=" << get_transaction_hash(tx));
+        CHECK_AND_ASSERT_MES(check_key(zout.amount_commitment), false,
+          "invalid amount_commitment in tx_out_zarcanum, tx id=" << get_transaction_hash(tx));
+        CHECK_AND_ASSERT_MES(rct::isInMainSubgroup(rct::pk2rct(zout.stealth_address)), false,
+          "stealth_address not in main subgroup in tx_out_zarcanum, tx id=" << get_transaction_hash(tx));
+        CHECK_AND_ASSERT_MES(rct::isInMainSubgroup(rct::aid2rct(zout.blinded_asset_id)), false,
+          "blinded_asset_id not in main subgroup in tx_out_zarcanum, tx id=" << get_transaction_hash(tx));
+        CHECK_AND_ASSERT_MES(rct::isInMainSubgroup(rct::pk2rct(zout.amount_commitment)), false,
+          "amount_commitment not in main subgroup in tx_out_zarcanum, tx id=" << get_transaction_hash(tx));
+        // Plaintext amount must be 0 — the real amount is hidden in the commitment.
+        CHECK_AND_ASSERT_MES(out.amount == 0, false,
+          "non-zero plaintext amount in tx_out_zarcanum, tx id=" << get_transaction_hash(tx));
+        continue;
+      }
+
       CHECK_AND_ASSERT_MES(std::holds_alternative<txout_to_key>(out.target), false, "wrong variant type: "
         << tools::type_name(tools::variant_type(out.target)) << ", expected " << tools::type_name<txout_to_key>()
         << ", in transaction id=" << get_transaction_hash(tx));
@@ -1084,6 +1142,13 @@ namespace cryptonote
     uint64_t money = 0;
     for(const auto& in: tx.vin)
     {
+      // Confidential asset inputs (txin_zc_input, HF23) carry no plaintext
+      // amount (it's hidden in the commitment, conserved separately by the
+      // asset balance proof), so they don't participate in this native-money
+      // overflow check.
+      if (std::holds_alternative<txin_zc_input>(in))
+        continue;
+
       uint64_t amount = 0;
       if (const auto* tokey_in = std::get_if<txin_to_key>(&in))
         amount = tokey_in->amount;                 // 0 for RCT inputs
@@ -1178,16 +1243,110 @@ namespace cryptonote
     return lookup_acc_outs(acc, tx, tx_pub_key, additional_tx_pub_keys, outs, money_transfered);
   }
   //---------------------------------------------------------------
+  // Check whether a tx_out_zarcanum output belongs to this account by comparing
+  // the expected stealth address derived from the shared secret.
+  bool is_out_to_acc(const account_keys& acc, const tx_out_zarcanum& zout,
+                     const crypto::public_key& tx_pub_key, size_t output_index)
+  {
+    crypto::key_derivation derivation;
+    if (!acc.get_device().generate_key_derivation(tx_pub_key, acc.m_view_secret_key, derivation))
+      return false;
+    crypto::public_key expected;
+    if (!acc.get_device().derive_public_key(derivation, output_index,
+                                            acc.m_account_address.m_spend_public_key, expected))
+      return false;
+    return expected == zout.stealth_address;
+  }
+
+  // ── HF21 helpers ─────────────────────────────────────────────────────────
+
+  rct::key zarcanum_derivation_to_scalar(const crypto::key_derivation& derivation,
+                                          size_t output_index,
+                                          const char* domain)
+  {
+    // Base scalar from the standard derivation path
+    crypto::ec_scalar base{};
+    crypto::derivation_to_scalar(derivation, output_index, base);
+
+    // Domain-separate by hashing: H(base || domain_string)
+    // This ensures "asset_blind", "amount_mask", "enc_amount" produce
+    // independent, uncorrelated scalars from the same derivation.
+    const size_t domain_len = strlen(domain);
+    std::vector<uint8_t> buf(32 + domain_len);
+    memcpy(buf.data(), base.data, 32);
+    memcpy(buf.data() + 32, domain, domain_len);
+
+    rct::key result;
+    keccak(buf.data(), (int)buf.size(), result.bytes, 32);
+    sc_reduce32(result.bytes);
+    return result;
+  }
+
+  bool decode_zarcanum_output(const account_keys& acc,
+                               const tx_out_zarcanum& zout,
+                               const crypto::key_derivation& derivation,
+                               size_t output_index,
+                               uint64_t& amount_out,
+                               crypto::asset_id& asset_id_out,
+                               rct::key& amount_mask_out,
+                               rct::key& asset_blinding_mask_out)
+  {
+    // 1. Ownership has already been verified by check_acc_out_precomp_once / is_out_to_acc_precomp
+
+    // 2. Recover asset blinding mask r and plaintext asset_id
+    //    T = asset_id + r*X  =>  asset_id = T - r*X
+    rct::key r = zarcanum_derivation_to_scalar(derivation, output_index, "asset_blind");
+    rct::key rX = rct::scalarmultX(r);
+    rct::key asset_id_rct;
+    rct::subKeys(asset_id_rct, rct::aid2rct(zout.blinded_asset_id), rX);
+    asset_id_out = rct::rct2aid(asset_id_rct);
+    asset_blinding_mask_out = r;
+
+    // 3. Recover amount mask and decrypt amount
+    //    C = amount*T + mask*G  (we verify this below)
+    amount_mask_out = zarcanum_derivation_to_scalar(derivation, output_index, "amount_mask");
+
+    // 4. Decrypt amount: enc_amount XOR le64(enc_mask)
+    rct::key enc_mask = zarcanum_derivation_to_scalar(derivation, output_index, "enc_amount");
+    uint64_t enc_mask_64;
+    memcpy(&enc_mask_64, enc_mask.bytes, sizeof(uint64_t));
+    amount_out = zout.encrypted_amount ^ enc_mask_64;
+
+    // 5. Verify: recompute amount commitment and compare.
+    //    C = amount*T + mask*G -- the commitment is built on this output's
+    //    OWN blinded asset id T (zout.blinded_asset_id), not the recovered
+    //    plaintext asset_id -- see rct::commitAsset.
+    rct::key expected_C = rct::commitAsset(amount_mask_out, rct::aid2rct(zout.blinded_asset_id), amount_out);
+    if (expected_C != rct::pk2rct(zout.amount_commitment))
+    {
+      MWARNING("zarcanum output commitment mismatch — output corrupted or not ours");
+      return false;
+    }
+
+    return true;
+  }
+  //---------------------------------------------------------------
   bool lookup_acc_outs(const account_keys& acc, const transaction& tx, const crypto::public_key& tx_pub_key, const std::vector<crypto::public_key>& additional_tx_pub_keys, std::vector<size_t>& outs, uint64_t& money_transfered)
   {
     CHECK_AND_ASSERT_MES(additional_tx_pub_keys.empty() || additional_tx_pub_keys.size() == tx.vout.size(), false, "wrong number of additional pubkeys" );
     money_transfered = 0;
     size_t i = 0;
-    for(const tx_out& o:  tx.vout)
+    for(const tx_out& o: tx.vout)
     {
       // Gateway deposit outputs (HF22) are transparent and never belong to a
       // scanning account; skip them (keeping the output index in sync).
       if (std::holds_alternative<tx_out_gateway>(o.target)) { i++; continue; }
+
+      if (std::holds_alternative<tx_out_zarcanum>(o.target))
+      {
+        // Confidential output: plaintext amount is 0 on-chain; the wallet
+        // decrypts the real amount during scan_output(). Only record the index here.
+        if (is_out_to_acc(acc, var::get<tx_out_zarcanum>(o.target), tx_pub_key, i))
+          outs.push_back(i);
+        // money_transfered is not updated — caller must decrypt via scan_output.
+        i++;
+        continue;
+      }
       CHECK_AND_ASSERT_MES(std::holds_alternative<txout_to_key>(o.target), false, "wrong type id in transaction out" );
       if(is_out_to_acc(acc, var::get<txout_to_key>(o.target), tx_pub_key, additional_tx_pub_keys, i))
       {
@@ -1226,6 +1385,71 @@ namespace cryptonote
     value += ' ';
     value += get_unit();
     return value;
+  }
+  //---------------------------------------------------------------
+  std::string print_asset_amount(uint64_t amount, uint8_t decimal_point, bool strip_zeros)
+  {
+    std::string s = std::to_string(amount);
+    if (s.size() < static_cast<size_t>(decimal_point) + 1)
+      s.insert(0, static_cast<size_t>(decimal_point) + 1 - s.size(), '0');
+
+    if (decimal_point > 0)
+      s.insert(s.size() - decimal_point, ".");
+
+    if (strip_zeros && decimal_point > 0)
+    {
+      while (!s.empty() && s.back() == '0')
+        s.pop_back();
+      if (!s.empty() && s.back() == '.')
+        s.pop_back();
+    }
+
+    return s;
+  }
+  //---------------------------------------------------------------
+  bool parse_asset_amount(uint64_t& amount, std::string_view str_amount, uint8_t decimal_point)
+  {
+    while (!str_amount.empty() && std::isspace((unsigned char)str_amount.front()))
+      str_amount.remove_prefix(1);
+    while (!str_amount.empty() && std::isspace((unsigned char)str_amount.back()))
+      str_amount.remove_suffix(1);
+
+    std::string str(str_amount);
+    auto point_index = str.find_first_of('.');
+    size_t fraction_size = 0;
+
+    if (point_index != std::string::npos)
+    {
+      fraction_size = str.size() - point_index - 1;
+      while (fraction_size > 0 && str.back() == '0')
+      {
+        str.pop_back();
+        --fraction_size;
+      }
+      if (fraction_size > decimal_point)
+        return false; // too many decimal places
+      str.erase(point_index, 1);
+    }
+
+    if (str.empty())
+      return false;
+
+    if (fraction_size < decimal_point)
+      str.append(decimal_point - fraction_size, '0');
+
+    for (char c : str)
+      if (!std::isdigit((unsigned char)c))
+        return false;
+
+    try
+    {
+      amount = std::stoull(str);
+    }
+    catch (const std::exception&)
+    {
+      return false;
+    }
+    return true;
   }
   //---------------------------------------------------------------
   std::string print_tx_verification_context(tx_verification_context const &tvc, transaction const *tx)
@@ -1368,10 +1592,15 @@ namespace cryptonote
     else
     {
       serialization::binary_string_archiver ba;
-      // Gateway inputs/outputs (HF22) are excluded from the RCT CLSAG/range-proof
-      // arrays; size the prunable serialization to the native input / RCT output
-      // counts (matching the tx serializer), and read the ring size from the
-      // first native input. Behaviour-preserving pre-HF22.
+      // Gateway inputs/outputs (HF22) and confidential-asset zarcanum in/outs
+      // (HF23) are excluded from the native RCT CLSAG/pseudoOut/range-proof
+      // arrays; size the prunable serialization to the native (txin_to_key)
+      // input count and the native (non-gateway, non-zarcanum) output count,
+      // and read the ring size from the first native input. These counts, and
+      // the gateway_proofs / zc_sig / asset_proofs emission and gating below,
+      // must match transaction::serialize_value (cryptonote_basic.h) exactly,
+      // or the prunable hash won't reproduce the serialized form.
+      // Behaviour-preserving pre-HF22/23.
       size_t native_inputs = 0;
       const txin_to_key* first_native = nullptr;
       for (const auto& in : t.vin)
@@ -1381,14 +1610,29 @@ namespace cryptonote
             first_native = &var::get<txin_to_key>(in);
           ++native_inputs;
         }
-      size_t rct_outputs = 0;
+      size_t native_outputs = 0;
       for (const auto& o : t.vout)
-        if (!std::holds_alternative<tx_out_gateway>(o.target))
-          ++rct_outputs;
+        if (!std::holds_alternative<tx_out_gateway>(o.target) &&
+            !std::holds_alternative<tx_out_zarcanum>(o.target))
+          ++native_outputs;
       size_t mixin = first_native ? first_native->key_offsets.size() - 1 : 0;
       try {
         const_cast<transaction&>(t).rct_signatures.p.serialize_rctsig_prunable(
-                ba, t.rct_signatures.type, native_inputs, rct_outputs, mixin);
+                ba, t.rct_signatures.type, native_inputs, native_outputs, mixin);
+        // The gateway_proofs (HF22), zc_sig and asset_proofs (HF23) are all
+        // serialized right after rctsig_prunable in transaction::serialize_value
+        // and sit after unprunable_size -- i.e. they are part of the PRUNABLE
+        // region that the blob-slice path above hashes. This re-serialize path
+        // must emit them too, in the SAME order (gateway_proofs, then zc_sig,
+        // then asset_proofs) and under the SAME presence gates, or the prunable
+        // hash won't match. Gateway and CA txs are distinct types, so at most
+        // one of these groups is ever present.
+        if (t.has_gateway_inputs() || t.type == txtype::update_gateway_address)
+          serialization::value(ba, const_cast<transaction&>(t).gateway_proofs);
+        if (t.has_zarcanum_inputs())
+          serialization::value(ba, const_cast<transaction&>(t).zc_sig);
+        if (!t.asset_proofs.empty() || t.has_zarcanum_outputs() || t.type == txtype::update_asset)
+          serialization::value(ba, const_cast<transaction&>(t).asset_proofs);
       } catch (const std::exception& e) {
         LOG_ERROR("Failed to serialize rct signatures (prunable): " << e.what());
         return false;

@@ -20,6 +20,8 @@ transaction::transaction(const transaction &t) :
   signatures(t.signatures),
   rct_signatures(t.rct_signatures),
   gateway_proofs(t.gateway_proofs),
+  zc_sig(t.zc_sig),
+  asset_proofs(t.asset_proofs),
   pruned(t.pruned),
   unprunable_size(t.unprunable_size.load()),
   prefix_size(t.prefix_size.load())
@@ -41,6 +43,8 @@ transaction& transaction::operator=(const transaction& t) {
   signatures = t.signatures;
   rct_signatures = t.rct_signatures;
   gateway_proofs = t.gateway_proofs;
+  zc_sig = t.zc_sig;
+  asset_proofs = t.asset_proofs;
   if (t.is_hash_valid()) {
     hash = t.hash;
     set_hash_valid(true);
@@ -62,6 +66,8 @@ void transaction::set_null()
   rct_signatures = {};
   rct_signatures.type = rct::RCTType::Null;
   gateway_proofs.clear();
+  zc_sig.clear();
+  asset_proofs.clear();
   set_hash_valid(false);
   set_blob_size_valid(false);
   pruned = false;
@@ -79,6 +85,8 @@ size_t transaction::get_signature_size(const txin_v& tx_in)
 {
   if (std::holds_alternative<txin_to_key>(tx_in))
     return var::get<txin_to_key>(tx_in).key_offsets.size();
+  if (std::holds_alternative<txin_zc_input>(tx_in))
+    return var::get<txin_zc_input>(tx_in).key_offsets.size();
   return 0;
 }
 

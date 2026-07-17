@@ -58,6 +58,11 @@ namespace boost
     a & reinterpret_cast<char (&)[sizeof(crypto::public_key)]>(x);
   }
   template <class Archive>
+  inline void serialize(Archive &a, crypto::asset_id &x, const boost::serialization::version_type ver)
+  {
+    a & reinterpret_cast<char (&)[sizeof(crypto::asset_id)]>(x);
+  }
+  template <class Archive>
   inline void serialize(Archive &a, crypto::secret_key &x, const boost::serialization::version_type ver)
   {
     a & reinterpret_cast<char (&)[sizeof(crypto::secret_key)]>(x);
@@ -71,11 +76,6 @@ namespace boost
   inline void serialize(Archive &a, crypto::key_image &x, const boost::serialization::version_type ver)
   {
     a & reinterpret_cast<char (&)[sizeof(crypto::key_image)]>(x);
-  }
-  template <class Archive>
-  inline void serialize(Archive &a, crypto::asset_id &x, const boost::serialization::version_type ver)
-  {
-    a & reinterpret_cast<char (&)[sizeof(crypto::asset_id)]>(x);
   }
 
   template <class Archive>
@@ -112,6 +112,18 @@ namespace boost
   inline void serialize(Archive &a, cryptonote::txout_to_scripthash &x, const boost::serialization::version_type ver)
   {
     a & x.hash;
+  }
+
+  // HF21: confidential asset output
+  template <class Archive>
+  inline void serialize(Archive &a, cryptonote::tx_out_zarcanum &x, const boost::serialization::version_type ver)
+  {
+    a & x.stealth_address;
+    a & x.amount_commitment;
+    a & x.blinded_asset_id;
+    a & x.encrypted_amount;
+    a & x.mix_attr;
+    a & x.version;
   }
 
   template <class Archive>
@@ -162,6 +174,13 @@ namespace boost
     a & x.gateway_addr;
     a & x.asset_id;
     a & x.amount;
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, cryptonote::txin_zc_input &x, const boost::serialization::version_type ver)
+  {
+    a & x.key_offsets;
+    a & x.k_image;
   }
 
   template <class Archive>

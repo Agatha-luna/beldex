@@ -331,6 +331,11 @@ namespace cryptonote::rpc {
   }
 
   void parse_request(RELAY_TX& relay_tx, rpc_input in){
+    // Backwards compat for older/local callers sending a single txid field.
+    if (auto* json_in = std::get_if<json>(&in))
+      if (auto it = json_in->find("txid"); it != json_in->end())
+        (*json_in)["txids"] = json::array({std::move(*it)});
+
     get_values(in,
        "txids", relay_tx.request.txids);
   }
@@ -389,6 +394,13 @@ namespace cryptonote::rpc {
         "from",  c.request.from);
   }
 
+  void parse_request(GET_GATEWAY_HISTORY& c, rpc_input in) {
+    get_values(in,
+        "count",      c.request.count,
+        "from",       c.request.from,
+        "gateway_id", required{c.request.gateway_id});
+  }
+
   void parse_request(GATEWAY_CREATE_TRANSFER& c, rpc_input in) {
     get_values(in,
         "amounts",      required{c.request.amounts},
@@ -420,6 +432,17 @@ namespace cryptonote::rpc {
         "encrypted_value", required{value_decrypt.request.encrypted_value},
         "name", required{value_decrypt.request.name},
         "type", required{value_decrypt.request.type});
+  }
+
+  void parse_request(GET_ASSET_INFO& asset_info, rpc_input in) {
+    get_values(in,
+        "asset_id", required{asset_info.request.asset_id});
+  }
+
+  void parse_request(GET_ASSET_LIST& asset_list, rpc_input in) {
+    get_values(in,
+        "count", asset_list.request.count,
+        "offset", asset_list.request.offset);
   }
 
   void parse_request(GET_QUORUM_STATE& qs, rpc_input in) {
