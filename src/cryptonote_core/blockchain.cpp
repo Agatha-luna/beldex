@@ -4018,6 +4018,29 @@ bool Blockchain::check_tx_inputs(transaction& tx, tx_verification_context &tvc, 
         return false;
       }
     }
+    else if (tx.type == txtype::deploy_new_asset || tx.type == txtype::emit_asset || tx.type == txtype::update_asset)
+    {
+      cryptonote::tx_extra_asset_descriptor_operation op;
+      size_t skip = 0;
+      uint64_t total_burn_required = 0;
+      while (cryptonote::get_asset_descriptor_operation_from_tx_extra(tx.extra, op, skip++)) {
+        total_burn_required += assets::burn_needed(hf_version, op.operation_type);
+      }
+      
+      if (total_burn_required > 0)
+      {
+        const uint64_t burn = cryptonote::get_burned_amount_from_tx_extra(tx.extra);
+        const uint64_t fee  = tx.rct_signatures.txnFee;
+
+        if (burn < total_burn_required || burn > fee)
+        {
+          tvc.m_verbose_error = "Asset transaction requires burning " + std::to_string(total_burn_required) + 
+                                " but burned " + std::to_string(burn) + " (fee: " + std::to_string(fee) + ")";
+          MERROR_VER("Failed to validate Asset TX reason: " << tvc.m_verbose_error);
+          return false;
+        }
+      }
+    }
   }
   }
   else
@@ -4195,7 +4218,9 @@ byte_and_output_fees Blockchain::get_dynamic_base_fee(uint64_t block_reward, siz
     assert(hi == 0);
     lo /= 5;
 
-    if (version >= hf::hf17_POS)
+    if (version >= feature::CONFIDENTIAL_ASSETS)
+      fees.second = FEE_PER_OUTPUT_V21;
+    else if(version >= hf::hf17_POS)
       fees.second = FEE_PER_OUTPUT_V17;
     else if (version >= feature::PER_OUTPUT_FEE)
       fees.second = old::FEE_PER_OUTPUT;

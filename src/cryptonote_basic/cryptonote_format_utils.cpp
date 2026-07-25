@@ -490,6 +490,32 @@ namespace cryptonote
     const size_t n_padded_outputs = bulletproof_plus ? rct::n_bulletproof_plus_max_amounts(rv.p.bulletproofs_plus) : rct::n_bulletproof_max_amounts(rv.p.bulletproofs);
     uint64_t bp_clawback = get_transaction_weight_clawback(tx, n_padded_outputs);
     CHECK_AND_ASSERT_THROW_MES_L1(bp_clawback <= std::numeric_limits<uint64_t>::max() - blob_size, "Weight overflow");
+    
+    // Add artificial weight padding for view wallets missing Zarcanum asset proofs
+    if (tx.version >= txversion::v4_tx_types && tx.asset_proofs.empty())
+    {
+      size_t num_zc_inputs = 0;
+      for (const auto& in : tx.vin)
+        if (std::holds_alternative<txin_zc_input>(in))
+          num_zc_inputs++;
+          
+      size_t num_zc_outputs = 0;
+      for (const auto& out : tx.vout)
+        if (std::holds_alternative<tx_out_zarcanum>(out.target))
+          num_zc_outputs++;
+          
+      if (num_zc_inputs > 0 || num_zc_outputs > 0)
+      {
+        size_t estimated_asset_proofs_size = 0;
+        estimated_asset_proofs_size += num_zc_inputs * 928;
+        estimated_asset_proofs_size += num_zc_outputs * 516;
+        if (num_zc_outputs > 0) estimated_asset_proofs_size += 640;
+
+        estimated_asset_proofs_size += 512; // padding for vector lengths
+        return blob_size + bp_clawback + estimated_asset_proofs_size;
+      }
+    }
+
     return blob_size + bp_clawback;
   }
   //---------------------------------------------------------------
@@ -1622,16 +1648,19 @@ namespace cryptonote
         // The gateway_proofs (HF22), zc_sig and asset_proofs (HF23) are all
         // serialized right after rctsig_prunable in transaction::serialize_value
         // and sit after unprunable_size -- i.e. they are part of the PRUNABLE
-        // region that the blob-slice path above hashes. This re-serialize path
+        // region that the blob-slice path above hashes
+        // (blob.substr(unprunable_size) covers them). This re-serialize path
         // must emit them too, in the SAME order (gateway_proofs, then zc_sig,
         // then asset_proofs) and under the SAME presence gates, or the prunable
-        // hash won't match. Gateway and CA txs are distinct types, so at most
-        // one of these groups is ever present.
+        // hash won't match for CA txs (zc inputs/outputs and
+        // update_asset/burn_asset carry their sigs/proofs here, not in the
+        // native CLSAG/bulletproof arrays). Gateway and CA txs are distinct
+        // types, so at most one of these groups is ever present.
         if (t.has_gateway_inputs() || t.type == txtype::update_gateway_address)
           serialization::value(ba, const_cast<transaction&>(t).gateway_proofs);
         if (t.has_zarcanum_inputs())
           serialization::value(ba, const_cast<transaction&>(t).zc_sig);
-        if (!t.asset_proofs.empty() || t.has_zarcanum_outputs() || t.type == txtype::update_asset)
+        if (!t.asset_proofs.empty() || t.has_zarcanum_outputs() || t.type == txtype::update_asset || t.type == txtype::burn_asset)
           serialization::value(ba, const_cast<transaction&>(t).asset_proofs);
       } catch (const std::exception& e) {
         LOG_ERROR("Failed to serialize rct signatures (prunable): " << e.what());

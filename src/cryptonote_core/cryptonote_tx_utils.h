@@ -344,7 +344,7 @@ namespace cryptonote
 
 }
 
-BOOST_CLASS_VERSION(cryptonote::tx_source_entry, 1)
+BOOST_CLASS_VERSION(cryptonote::tx_source_entry, 2)
 BOOST_CLASS_VERSION(cryptonote::tx_destination_entry, 3)
 
 namespace boost
@@ -365,6 +365,11 @@ namespace boost
         return;
       a & x.multisig_kLRki;
       a & x.real_out_additional_tx_keys;
+      if (ver < 2)
+        return;
+      a & x.asset_id;
+      a & x.asset_mask;
+      a & x.ring_blinded_asset_ids;
     }
 
     template <class Archive>
@@ -385,11 +390,15 @@ namespace boost
       if (ver < 3)
       {
         x.is_gateway = false;
+        x.asset_id = crypto::null_aid;
         return;
       }
+      // Version 3 carries both the gateway (HF22) and confidential-asset (HF23)
+      // fields, in the same order as the BEGIN_SERIALIZE_OBJECT above.
       a & x.is_gateway;
       a & x.gateway_id;
       a & x.gateway_payment_id;
+      a & x.asset_id;
     }
   }
 }
