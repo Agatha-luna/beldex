@@ -449,7 +449,7 @@ namespace cryptonote
           std::unique_lock b_lock{m_blockchain};
           LockedTXN lock(m_blockchain);
           m_blockchain.add_txpool_tx(id, blob, meta);
-          if (!insert_key_images(tx, id, opts.kept_by_block))
+          if (!insert_key_images(tx, id, opts.kept_by_block, &tvc.m_verbose_error))
             return false;
           m_txs_by_fee_and_receive_time.emplace(std::tuple<bool, double, std::time_t>(non_standard_tx, fee / (double)(tx_weight ? tx_weight : 1), receive_time), id);
           lock.commit();
@@ -495,7 +495,7 @@ namespace cryptonote
         LockedTXN lock(m_blockchain);
         m_blockchain.remove_txpool_tx(id);
         m_blockchain.add_txpool_tx(id, blob, meta);
-        if (!insert_key_images(tx, id, opts.kept_by_block))
+        if (!insert_key_images(tx, id, opts.kept_by_block, &tvc.m_verbose_error))
           return false;
         m_txs_by_fee_and_receive_time.emplace(std::tuple<bool, double, std::time_t>(non_standard_tx, fee / (double)(tx_weight ? tx_weight : 1), receive_time), id);
         lock.commit();
@@ -881,7 +881,7 @@ namespace cryptonote
       MINFO("Pool weight after pruning is still larger than limit: " << m_txpool_weight << "/" << m_txpool_max_weight);
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::insert_key_images(const transaction_prefix &tx, const crypto::hash &id, bool kept_by_block)
+  bool tx_memory_pool::insert_key_images(const transaction_prefix &tx, const crypto::hash &id, bool kept_by_block, std::string *out_gw_reason)
   {
     for(const auto& in: tx.vin)
     {
@@ -905,6 +905,8 @@ namespace cryptonote
       if (!insert_gateway_spends(tx, gw_reason))
       {
         MERROR("gateway pool check failed for tx " << id << ": " << gw_reason);
+        if (out_gw_reason)
+          *out_gw_reason = std::move(gw_reason);
         return false;
       }
     }
@@ -976,7 +978,15 @@ namespace cryptonote
     std::map<std::pair<crypto::public_key, crypto::asset_id>, uint64_t> need;
     for (const auto& in : tx.vin)
       if (const auto* g = std::get_if<txin_gateway>(&in))
-        need[{g->gateway_addr, g->asset_id}] += g->amount;
+      {
+        auto& amount = need[{g->gateway_addr, g->asset_id}];
+        if (amount > std::numeric_limits<uint64_t>::max() - g->amount)
+        {
+          reason = "gateway withdrawal amount overflow";
+          return false;
+        }
+        amount += g->amount;
+      }
 
     // Check cumulative pending + this tx <= on-chain balance.
     for (const auto& [gk, amount] : need)
@@ -987,6 +997,11 @@ namespace cryptonote
         onchain = acct.balance_for(gk.second);
       auto it = m_gateway_pending_spends.find(gk);
       const uint64_t pending = it == m_gateway_pending_spends.end() ? 0 : it->second;
+      if (pending > std::numeric_limits<uint64_t>::max() - amount)
+      {
+        reason = "gateway pending withdrawal amount overflow";
+        return false;
+      }
       const uint64_t remaining = onchain <= pending ? 0 : onchain - pending;
       if (amount > remaining)
       {
@@ -999,7 +1014,10 @@ namespace cryptonote
     if (pending_register)
       m_gateway_pending_registers.insert(*pending_register);
     for (const auto& [gk, amount] : need)
-      m_gateway_pending_spends[gk] += amount;
+    {
+      auto& pending = m_gateway_pending_spends[gk];
+      pending += amount;
+    }
     return true;
   }
   //---------------------------------------------------------------------------------
