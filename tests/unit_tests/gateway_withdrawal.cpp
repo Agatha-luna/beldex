@@ -21,7 +21,7 @@ using namespace cryptonote;
 namespace {
 
   constexpr network_type NET = network_type::MAINNET;
-  constexpr hf HF = hf::hf22_gateway_addresses;
+  constexpr hf HF = hf::hf23_gateway_addresses;
 
   // A random source gateway id (identity only; the balance proof / sum check
   // never touch DB state, so this need not be "registered" for these tests).

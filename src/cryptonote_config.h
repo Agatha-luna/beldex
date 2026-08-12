@@ -271,8 +271,8 @@ enum class hf : uint8_t
     hf19_enhance_bns, // provided EVM address in BNS
     hf20_bulletproof_plus,
     hf21_bulletproof_plus,
-    hf22_gateway_addresses, // Account-model gateway addresses for exchanges/bridges/DEXes
-    hf23_confidential_assets, // Confidential custom asset transfers
+    hf22_confidential_assets, // Confidential custom asset transfers
+    hf23_gateway_addresses, // Account-model gateway addresses for exchanges/bridges/DEXes
 
     _next,
     none = 0
@@ -304,8 +304,8 @@ namespace feature {
   constexpr auto CLSAG                        = hf::hf15_flash;
   constexpr auto PROOF_BTENC                  = hf::hf18_bns;
   constexpr auto BULLETPROOF_PLUS             = hf::hf20_bulletproof_plus;
-  constexpr auto GATEWAY_ADDRESSES            = hf::hf22_gateway_addresses;
-  constexpr auto CONFIDENTIAL_ASSETS          = hf::hf23_confidential_assets;
+  constexpr auto CONFIDENTIAL_ASSETS          = hf::hf22_confidential_assets;
+  constexpr auto GATEWAY_ADDRESSES            = hf::hf23_gateway_addresses;
 }
 
 enum network_type : uint8_t

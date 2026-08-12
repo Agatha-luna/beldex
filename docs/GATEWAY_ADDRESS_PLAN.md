@@ -3,14 +3,16 @@
 Port of Zano's HF6 Gateway Address feature (account-model addresses for
 exchanges/bridges/DEXes).
 
-**Base branch: `dev`. Rollout order: HF22 = gateway addresses,
-HF23/24 = confidential assets (CA) later.** The gateway wire format and DB
-are designed asset-aware from day 1 so CA plugs in without migration:
-every gateway structure carries an `asset_id` (`crypto::public_key`), and
-**`null_aid` is the permanent sentinel for native BDX**. At HF22 consensus
-requires `asset_id == null_aid` everywhere; the CA fork later relaxes this
-to "null_aid or a registered asset". The sentinel stays even after CA
-(no DB migration; the CA layer maps its native-asset representation onto it).
+**Base branch: `dev`. Rollout order: HF22 = confidential assets (CA),
+HF23 = gateway addresses later.** The gateway wire format and DB
+are designed asset-aware from day 1 so it plugs in against an already-live
+CA without migration: every gateway structure carries an `asset_id`
+(`crypto::public_key`), and **`null_aid` is the permanent sentinel for
+native BDX**. At HF23 gateway consensus requires `asset_id == null_aid`
+everywhere; a later fork may relax this to "null_aid or a registered asset"
+now that CA (HF22) is already active. The sentinel stays stable across both
+forks (no DB migration; the gateway layer maps its native-asset
+representation onto it).
 
 ## 0. What we're building (recap)
 
@@ -41,7 +43,7 @@ A gateway address is an **account**, not a UTXO wallet:
   (Zano stores the account under `register.view_pub_key`). The owner_key
   (possibly foreign-curve) authorizes spends; the view key decrypts
   deposit metadata.
-- Owner key is a variant with **all three types supported at HF22 launch**
+- Owner key is a variant with **all three types supported at HF23 launch**
   (matching Zano): Beldex-native ed25519 Schnorr, secp256k1 ETH-style ECDSA,
   and RFC-8032 EdDSA — so external MPC/TSS custody systems (THORChain, Maya,
   NEAR Intents style) can hold gateways directly from day 1.
@@ -50,9 +52,9 @@ A gateway address is an **account**, not a UTXO wallet:
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | HF gating | `hf::hf22_gateway_addresses`, `feature::GATEWAY_ADDRESSES`. CA lands at HF23/24 independently. |
-| 2 | Asset support | `asset_id` fields everywhere now; `null_aid` = native BDX (permanent sentinel). HF22 consensus: must be `null_aid`. Post-CA fork: may be a registered asset id. |
-| 3 | Owner key types | **All three at HF22 launch** (as in Zano): (a) `crypto::public_key` — Beldex ed25519 + plain Schnorr sig; (b) `eth_public_key` — secp256k1 compressed, ETH-style compact ECDSA; (c) `eddsa_public_key` — RFC-8032 Ed25519. Signature type must match key type at verification. |
+| 1 | HF gating | `hf::hf23_gateway_addresses`, `feature::GATEWAY_ADDRESSES`. CA lands earlier at HF22. |
+| 2 | Asset support | `asset_id` fields everywhere now; `null_aid` = native BDX (permanent sentinel). HF23 consensus: must be `null_aid`. A later fork may relax this to allow a registered asset id (CA is already live by then). |
+| 3 | Owner key types | **All three at HF23 launch** (as in Zano): (a) `crypto::public_key` — Beldex ed25519 + plain Schnorr sig; (b) `eth_public_key` — secp256k1 compressed, ETH-style compact ECDSA; (c) `eddsa_public_key` — RFC-8032 Ed25519. Signature type must match key type at verification. |
 | 4 | Registration fee | `GATEWAY_ADDRESS_REGISTRATION_FEE` constant, burned via existing `coin_burn` / `TX_EXTRA_TAG_BURN` machinery. |
 | 5 | Amounts | Plaintext (like Zano v1). Hidden-amount gateways are future work upstream too. |
 | 6 | Proof placement | New serialized tx field `std::vector<gateway_proof_v> gateway_proofs` (input sigs + ownership proof), present only when the tx has gateway constructs. When CA arrives it can generalize this vector into its `asset_proofs` (the CA branch already uses exactly this pattern), keeping the merge clean. |
@@ -63,7 +65,7 @@ A gateway address is an **account**, not a UTXO wallet:
 - `CRYPTONOTE_PUBLIC_GATEWAY_ADDRESS_BASE58_PREFIX` (+ integrated variant)
   rendering as `gwB…` / `gwiB…`.
 - `GATEWAY_ADDRESS_REGISTRATION_FEE`.
-- `hf::hf22_gateway_addresses` + `feature::GATEWAY_ADDRESSES`.
+- `hf::hf23_gateway_addresses` + `feature::GATEWAY_ADDRESSES`.
 - Domain-separation hashkeys: `GW_INPUT_SIG`, `GW_OWNERSHIP`.
 
 **`src/cryptonote_basic/cryptonote_basic.h`**
@@ -88,15 +90,13 @@ A gateway address is an **account**, not a UTXO wallet:
 
 **`src/cryptonote_basic/txtypes.h`**
 - `txtype::register_gateway_address`, `txtype::update_gateway_address`
-  immediately after `coin_burn`; bump `get_max_type_for_hf` (HF22),
-  `type_to_string`, `is_transfer`. `get_max_type_for_hf` is a *range* check,
-  so gateway types must be numerically below CA's.
-  **CORRECTION (verified in code):** Beldex `coin_burn = 5` (not 6), so the
-  actual values are **`register_gateway_address = 6`, `update_gateway_address = 7`**
-  — earlier "7/8" wording assumed `coin_burn = 6`. What is invariant is the
-  *ordering* (gateway right after coin_burn, below CA); the CA branch renumbers
-  deploy/emit/update_asset to sit **above `update_gateway_address`** at rebase
-  (i.e. 8/9/10, not 9/10/11 — see §6).
+  immediately after CA's `deploy_new_asset/emit_asset/update_asset/burn_asset`;
+  bump `get_max_type_for_hf` (HF23), `type_to_string`, `is_transfer`.
+  `get_max_type_for_hf` is a *range* check, so gateway types must be
+  numerically **above** CA's, since CA (HF22) now ships first.
+  **Current values (verified in code):** Beldex `coin_burn = 5`, CA's
+  `deploy_new_asset/emit_asset/update_asset/burn_asset = 6/7/8/9`, and
+  **`register_gateway_address = 10`, `update_gateway_address = 11`** — see §6.
 
 **`src/cryptonote_basic/tx_extra.h`**
 - `TX_EXTRA_TAG_GATEWAY_DESCRIPTOR_OPERATION = 0x7C`
@@ -156,22 +156,23 @@ Landed (wire format & basic types — compiles and links in the full tree):
   `eddsa_public_key` 32B, `eddsa_signature` 64B) in `crypto.h`, `CRYPTO_MAKE_COMPARABLE`
   (not hashable — `eth_public_key` is 1-byte aligned) + `BLOB_SERIALIZER`s.
   NOTE: `eth_public_key` deliberately has **no `alignas`** (33 ≠ multiple of 8).
-- **Config** (`cryptonote_config.h`): `hf::hf22_gateway_addresses`,
+- **Config** (`cryptonote_config.h`): `hf::hf23_gateway_addresses`,
   `feature::GATEWAY_ADDRESSES`, `GATEWAY_ADDRESS_REGISTRATION_FEE`
   (100 BDX literal — COIN lives in `beldex_economy.h` which includes config),
   `hashkey::{GW_INPUT_SIG,GW_OWNERSHIP,GW_OUT_PID_MASK}`, and
   `PUBLIC_GATEWAY_ADDRESS_BASE58_PREFIX` / `PUBLIC_INTEGRATED_GATEWAY_ADDRESS_BASE58_PREFIX`
   for all networks + the runtime `network_config` struct.
   Prefix numeric values are **finalized and verified** (see "Base58 prefixes" below).
-- **txtypes** (`txtypes.h`): `register_gateway_address = 6`,
-  `update_gateway_address = 7` (Beldex `coin_burn = 5`, so these land at 6/7,
-  not the "7/8" in older text); `get_max_type_for_hf` (HF22 → update_gateway),
+- **txtypes** (`txtypes.h`): `register_gateway_address = 10`,
+  `update_gateway_address = 11` (Beldex `coin_burn = 5`; CA's
+  `deploy_new_asset/emit_asset/update_asset/burn_asset` occupy 6-9 since CA
+  ships first); `get_max_type_for_hf` (HF23 → update_gateway),
   `type_to_string`, `is_transfer` all updated.
 - **Wire types** (`cryptonote_basic.h`): `gateway_address_id`, `txin_gateway`
   (tag **0x4** in `txin_v`), `tx_out_gateway` (tag **0x4** in `txout_target_v`),
   `VARIANT_TAG`s registered. Transaction serializer now sizes RCT
   pseudoOuts/CLSAGs to the **native (`txin_to_key`) input count** (gateway
-  inputs excluded), behaviour-preserving pre-HF22. `get_signature_size`
+  inputs excluded), behaviour-preserving pre-HF23. `get_signature_size`
   returns 0 for gateway inputs (already the default).
 - **Owner key/sig + proofs** (`cryptonote_basic.h`): `gateway_owner_key_v`,
   `gateway_owner_sig_v`, `gateway_descriptor_base`, `gateway_input_sig` (0xc0),
@@ -256,7 +257,7 @@ Remaining before Phase 1 is fully "done" (milestone order §7):
   - `append_/rewind_gateways_from_transactions` — apply on block-add, **exact-
     inverse** rewind on block-pop (reverse tx & op order, pop the matching
     descriptor, remove the account when history+balances are empty).
-- **Hooks** (`blockchain.cpp`, HF22-gated): `validate_tx_gateway_operations_against_db`
+- **Hooks** (`blockchain.cpp`, HF23-gated): `validate_tx_gateway_operations_against_db`
   in `check_tx_inputs`; `append_gateways_from_transactions` at block-add (beside
   the BNS hook); `rewind_gateways_from_transactions` at block-pop. Register/update
   gateway types added to the `MIN_2_OUTPUTS` exemption (they burn a fee like
@@ -312,7 +313,7 @@ output-minting path). Deposits and pure-gateway transfers are complete.
 
 **Still TODO for Phase 2:** `core_tests` (register insufficient-fee/dup reject,
 update wrong/right owner key, deposit, withdraw overdraft reject, mixed RCT+gateway
-balance, pure-gateway tx, non-null `asset_id` rejected at HF22, **reorg** across
+balance, pure-gateway tx, non-null `asset_id` rejected at HF23, **reorg** across
 register/deposit/withdraw, pool overdraft with two competing withdrawals). The full
 build-verify of everything above is ✅ done (2026-07-07).
 
@@ -330,7 +331,7 @@ build-verify of everything above is ✅ done (2026-07-07).
   `gateway_account_data { version; std::vector<gateway_descriptor_base>
   descriptor_history; std::map<crypto::asset_id /*null_aid =
   native*/, uint64_t> balances; }`.
-  The balances map is asset-keyed **now** even though HF22 only ever writes
+  The balances map is asset-keyed **now** even though HF23 only ever writes
   the `null_aid` entry — this is the forward-compat requirement for CA.
 - Optional table `m_gateway_tx_history` (`gateway_addr -> tx hashes`) for
   the history RPC (Zano keeps exactly this).
@@ -350,7 +351,7 @@ after merge):
 - `validate_tx_gateway_operations_against_db` per-tx:
   - `tx_out_gateway.gateway_addr` registered; `amount > 0`
     (stricter than Zano, deliberately);
-  - HF22 rule: `asset_id == null_aid` on every gateway in/out
+  - HF23 rule: `asset_id == null_aid` on every gateway in/out
     (single relaxation point for the CA fork later);
   - every `txin_gateway`: sig valid for latest owner key
     (message = `H(GW_INPUT_SIG ‖ tx prefix hash)`), balance sufficient.
@@ -394,7 +395,7 @@ Our pool tracker is deliberately stronger than Zano.)
    dedup covers resubmission).
 3. Reject a second pending `register` for the same address.
 
-**Balance equation (native-only at HF22).**
+**Balance equation (native-only at HF23).**
 Gateway amounts are transparent and enter the existing RCT balance check as
 deterministic zero-mask terms on the native generator `H`:
 - `tx_out_gateway` amount `a` → add `a·H` to the output commitment sum
@@ -449,7 +450,7 @@ any non-gateway signature slot (Zano parity).
   id and recompute the hash before signing — never blind-sign a bare hash
   from the daemon. Ship a verification helper alongside the RPC.
 
-**Consensus verification order:** semantics (HF22 gating, null_aid,
+**Consensus verification order:** semantics (HF23 gating, null_aid,
 amount>0, no coinbase/flash/legacy-pid) → owner sig vs latest descriptor
 key, type-matched, **canonical encoding enforced** → BP+ → residual
 double-Schnorr → pool pending-spend tracker → block-apply underflow check
@@ -604,7 +605,7 @@ never need a Beldex wallet. Deposits need no gateway RPC — normal
 **`simplewallet` + `wallet_rpc_server`**: `register_gateway_address`,
 `gateway_info <addr>`, `gateway_withdraw`, `transfer` accepting `gwB…`
 destinations. All balance fields shaped as `{asset_id, amount}` lists now
-(HF22 always returns the single native entry) so RPC schemas don't break
+(HF23 always returns the single native entry) so RPC schemas don't break
 at the CA fork.
 
 ## 5. Phase 4 — tests
@@ -615,9 +616,9 @@ at the CA fork.
 - `core_tests`: register (insufficient-fee reject, duplicate reject),
   update with wrong/right owner key, deposit, withdraw (overdraft reject),
   mixed RCT+gateway balance equation, pure-gateway tx, non-null `asset_id`
-  rejected at HF22, **reorg** across register/deposit/withdraw restores
+  rejected at HF23, **reorg** across register/deposit/withdraw restores
   balances exactly, pool overdraft (two competing withdrawals).
-- HF gating: all constructs rejected pre-HF22.
+- HF gating: all constructs rejected pre-HF23.
 
 ## 6. CA merge coordination (HF23/24)
 
@@ -631,12 +632,11 @@ Based on a full review of `feature-confidential-asset` (state as of
   chronology doesn't matter here.)
 - **txtype enum values** — these DO have an ordering constraint:
   `get_max_type_for_hf` is a range check, so types enabled at an earlier HF
-  must be numerically smaller. Gateway ships first (HF22) ⇒
-  `register_gateway_address = 6`, `update_gateway_address = 7` (Beldex
-  `coin_burn = 5`; the earlier "7/8" here assumed `coin_burn = 6`). The CA
-  branch must renumber `deploy_new_asset/emit_asset/update_asset` from
-  7/8/9 → **8/9/10** so they sit above `update_gateway_address` when it
-  rebases. This is the one unavoidable CA-branch change — agree on it now.
+  must be numerically smaller. CA ships first (HF22) ⇒
+  `deploy_new_asset = 6`, `emit_asset = 7`, `update_asset = 8`,
+  `burn_asset = 9` (Beldex `coin_burn = 5`). Gateway's
+  `register_gateway_address = 10`, `update_gateway_address = 11` sit above
+  the CA types since gateway (HF23) now ships after CA.
 - **tx_extra tags** — asset op = 0x7B (taken by CA), gateway op = 0x7C. OK.
 - **Proof variant tags** — CA's `asset_proof_v` uses 0xb0–0xb5. Gateway
   proof types take **0xc0+** (`gateway_input_sig` = 0xc0,
@@ -651,11 +651,11 @@ Based on a full review of `feature-confidential-asset` (state as of
 - **Balance domains** — CA keeps two independent balance equations:
   native BDX in `rct_signatures` (CLSAG/pseudoOuts sized to native inputs
   only) and a ZC-domain equation `sum(zc_in C) − sum(zc_out C) = mask·G`
-  proven by double-Schnorr. Gateway at HF22 (native only) adds its
+  proven by double-Schnorr. Gateway at HF23 (native only) adds its
   transparent `a·H` terms to the **native** equation. Post-CA, a gateway
   in/out with a non-null asset_id adds a transparent `a·H_asset` term to
   the **ZC-domain** statement (`P = sum_in − sum_out − gw_terms`). Design
-  the HF22 code so the generator comes from `asset_id` (`null_aid → H`).
+  the HF23 code so the generator comes from `asset_id` (`null_aid → H`).
 - **Prunable sizing** — the CA branch already computes `native_inputs`
   when sizing CLSAG arrays (cryptonote_basic.h serializer). Gateway must
   extend the same exclusion (`txin_gateway` is neither native nor ZC);
@@ -675,7 +675,7 @@ Based on a full review of `feature-confidential-asset` (state as of
 
 1. Crypto groundwork: vendor secp256k1, port `eth_signature` +
    `eddsa_signature` from Zano, unit-test all three verify paths.
-2. Types + serialization + HF22 constant — compiles, round-trips
+2. Types + serialization + HF23 constant — compiles, round-trips
    (all three owner-key variants).
 3. DB table + `gateway_utils` apply/rewind + register op end-to-end on
    devnet (deposit/withdraw not yet spendable).
@@ -736,9 +736,9 @@ starting milestone 4; the rest are tracked gaps.
    proofs, all three owner-key variants, non-null `asset_id` values, and a
    pruned-vs-full round-trip once issue 1 is fixed. Only the eth/eddsa crypto
    unit tests exist so far.
-9. **Pending — no `hf22_gateway_addresses` entry in `hardfork.cpp`**
-   (any network). Devnet/testnet heights needed before milestone 3 devnet
-   testing; mainnet height stays unset until rehearsal.
+9. **Pending — no `hf23_gateway_addresses` entry in mainnet/devnet
+   `hardfork.cpp`** (testnet has one). Devnet/mainnet heights needed before
+   milestone 3 devnet testing; mainnet height stays unset until rehearsal.
 10. **Minor**: gateway base58 prefix values are provisional (need the
     `gwB…`/`gwiB…` round-trip test); `tx_extra_gateway_descriptor_operation`
     uses raw `crypto::public_key` instead of the `gateway_address_id` alias

@@ -95,7 +95,7 @@ namespace
 // --- register: accepted, stored, owner key correct ---------------------------
 bool beldex_gateway_register::generate(std::vector<test_event_entry>& events)
 {
-  auto hard_forks = beldex_generate_hard_fork_table(hf::hf22_gateway_addresses);
+  auto hard_forks = beldex_generate_hard_fork_table(hf::hf23_gateway_addresses);
   beldex_chain_generator gen(events, hard_forks);
   account_base miner = gen.first_miner_;
   gen.add_blocks_until_version(hard_forks.back().version);
@@ -125,7 +125,7 @@ bool beldex_gateway_register::generate(std::vector<test_event_entry>& events)
 // --- register with an insufficient burn is rejected --------------------------
 bool beldex_gateway_register_insufficient_fee::generate(std::vector<test_event_entry>& events)
 {
-  auto hard_forks = beldex_generate_hard_fork_table(hf::hf22_gateway_addresses);
+  auto hard_forks = beldex_generate_hard_fork_table(hf::hf23_gateway_addresses);
   beldex_chain_generator gen(events, hard_forks);
   account_base miner = gen.first_miner_;
   gen.add_blocks_until_version(hard_forks.back().version);
@@ -140,7 +140,7 @@ bool beldex_gateway_register_insufficient_fee::generate(std::vector<test_event_e
 // --- registering the same gateway twice is rejected --------------------------
 bool beldex_gateway_register_duplicate::generate(std::vector<test_event_entry>& events)
 {
-  auto hard_forks = beldex_generate_hard_fork_table(hf::hf22_gateway_addresses);
+  auto hard_forks = beldex_generate_hard_fork_table(hf::hf23_gateway_addresses);
   beldex_chain_generator gen(events, hard_forks);
   account_base miner = gen.first_miner_;
   gen.add_blocks_until_version(hard_forks.back().version);
@@ -174,7 +174,7 @@ bool beldex_gateway_register_pre_hf22::generate(std::vector<test_event_entry>& e
 // --- update with the correct owner signature rotates the owner key -----------
 bool beldex_gateway_update::generate(std::vector<test_event_entry>& events)
 {
-  auto hard_forks = beldex_generate_hard_fork_table(hf::hf22_gateway_addresses);
+  auto hard_forks = beldex_generate_hard_fork_table(hf::hf23_gateway_addresses);
   beldex_chain_generator gen(events, hard_forks);
   account_base miner = gen.first_miner_;
   gen.add_blocks_until_version(hard_forks.back().version);
@@ -211,7 +211,7 @@ bool beldex_gateway_update::generate(std::vector<test_event_entry>& events)
 // --- update signed by the wrong key is rejected ------------------------------
 bool beldex_gateway_update_wrong_key::generate(std::vector<test_event_entry>& events)
 {
-  auto hard_forks = beldex_generate_hard_fork_table(hf::hf22_gateway_addresses);
+  auto hard_forks = beldex_generate_hard_fork_table(hf::hf23_gateway_addresses);
   beldex_chain_generator gen(events, hard_forks);
   account_base miner = gen.first_miner_;
   gen.add_blocks_until_version(hard_forks.back().version);
@@ -235,7 +235,7 @@ bool beldex_gateway_update_wrong_key::generate(std::vector<test_event_entry>& ev
 // --- a reorg that pops the register block removes the gateway ----------------
 bool beldex_gateway_register_reorg::generate(std::vector<test_event_entry>& events)
 {
-  auto hard_forks = beldex_generate_hard_fork_table(hf::hf22_gateway_addresses);
+  auto hard_forks = beldex_generate_hard_fork_table(hf::hf23_gateway_addresses);
   beldex_chain_generator gen(events, hard_forks);
   account_base miner = gen.first_miner_;
   gen.add_blocks_until_version(hard_forks.back().version);

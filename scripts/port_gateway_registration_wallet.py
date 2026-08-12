@@ -24,9 +24,9 @@ def patch_wallet2():
     if (reason) *reason = ERR_MSG_NETWORK_VERSION_QUERY_FAILED;
     return {};
   }
-  if (*hf_version < hf::hf22_gateway_addresses)
+  if (*hf_version < hf::hf23_gateway_addresses)
   {
-    if (reason) *reason = "gateway addresses are only available from hardfork 22";
+    if (reason) *reason = "gateway addresses are only available from hardfork 23";
     return {};
   }
 
