@@ -123,7 +123,7 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const std::pair
     }
     else if (std::holds_alternative<txin_gateway>(tx_input))
     {
-      /* HF22 gateway withdrawal input: no key image to record. The gateway
+      /* HF23 gateway withdrawal input: no key image to record. The gateway
          balance is decremented separately in append_gateways_from_transactions. */
     }
     else
@@ -148,7 +148,7 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const std::pair
 
   std::vector<uint64_t> amount_output_indices(tx.vout.size());
 
-  // HF21: rct_signatures.outPk is COMPACTED to non-zarcanum (native) outputs --
+  // HF22: rct_signatures.outPk is COMPACTED to non-zarcanum (native) outputs --
   // tx_out_zarcanum outputs carry their own commitment and are excluded when
   // genRctSimple builds outPk. So outPk must be indexed by the native-output
   // position, NOT the vout index; otherwise a mixed native+zarcanum tx reads
@@ -163,7 +163,7 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const std::pair
   // we need the index
   for (uint64_t i = 0; i < tx.vout.size(); ++i)
   {
-    // Gateway deposit outputs (tx_out_gateway, HF22) are transparent and are not
+    // Gateway deposit outputs (tx_out_gateway, HF23) are transparent and are not
     // spendable RCT outputs, so they are not indexed in the output tables (and
     // have no rct_signatures.outPk entry). They are constructed last in vout.
     if (std::holds_alternative<cryptonote::tx_out_gateway>(tx.vout[i].target))

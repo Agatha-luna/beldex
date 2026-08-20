@@ -1717,7 +1717,7 @@ namespace cryptonote::rpc {
     std::vector<std::uint64_t> distribution;
     std::uint64_t start_height;
     std::uint64_t base;
-    std::vector<std::uint64_t> output_indices; // bucket_rank → real amount-0 global index; populated only for native/asset filter
+    std::vector<std::uint64_t> output_indices; // bucket_rank → real amount-0 global index; populated only for native/token filter
   };
 
 
@@ -2639,28 +2639,28 @@ namespace cryptonote::rpc {
     }request;
   };
 
-  // ── HF21 Confidential Asset RPC endpoints ──────────────────────────────────
+  // ── HF22 Private Token RPC endpoints ──────────────────────────────────
 
-  /// RPC: daemon/get_asset_info
-  /// Returns the current state of a registered confidential asset.
-  /// Input:  asset_id (hex-encoded 32-byte public key)
+  /// RPC: daemon/get_token_info
+  /// Returns the current state of a registered private token.
+  /// Input:  token_id (hex-encoded 32-byte public key)
   /// Output: ticker, full_name, owner, current_supply, total_max_supply,
   ///         decimal_point, operation_count
-  struct GET_ASSET_INFO : PUBLIC
+  struct GET_TOKEN_INFO : PUBLIC
   {
-    static constexpr auto names() { return NAMES("get_asset_info"); }
+    static constexpr auto names() { return NAMES("get_token_info"); }
 
     struct request_parameters {
-      std::string asset_id; ///< Hex-encoded asset ID (32 bytes = 64 hex chars)
+      std::string token_id; ///< Hex-encoded token ID (32 bytes = 64 hex chars)
     } request;
   };
 
-  /// RPC: daemon/get_asset_list
-  /// Returns the list of all registered asset IDs on the chain.
-  /// Output: asset_ids (array of hex strings)
-  struct GET_ASSET_LIST : PUBLIC
+  /// RPC: daemon/get_token_list
+  /// Returns the list of all registered token IDs on the chain.
+  /// Output: token_ids (array of hex strings)
+  struct GET_TOKEN_LIST : PUBLIC
   {
-    static constexpr auto names() { return NAMES("get_asset_list"); }
+    static constexpr auto names() { return NAMES("get_token_list"); }
 
     struct request_parameters {
       uint64_t offset = 0;   ///< Pagination offset
@@ -2692,7 +2692,7 @@ namespace cryptonote::rpc {
 
   /// RPC: gateway/get_gateway_info
   ///
-  /// Returns the current consensus state of a gateway account (HF22): its latest
+  /// Returns the current consensus state of a gateway account (HF23): its latest
   /// descriptor (owner key + meta) and materialized balances. This is the
   /// "instant sync" API — balances are read straight from the node, no scanning.
   ///
@@ -2705,7 +2705,7 @@ namespace cryptonote::rpc {
   /// - `owner_key_type` -- 0 = Schnorr/ed25519, 1 = eth secp256k1, 2 = eddsa.
   /// - `owner_key` -- hex of the latest owner key.
   /// - `meta_info` -- descriptor meta string.
-  /// - `balances` -- list of {asset_id (hex), amount}.
+  /// - `balances` -- list of {token_id (hex), amount}.
   /// - `status` -- Generic RPC error code. "OK" is the success value.
   struct GET_GATEWAY_INFO : PUBLIC
   {
@@ -2718,7 +2718,7 @@ namespace cryptonote::rpc {
 
   /// RPC: gateway/get_all_gateways
   ///
-  /// Paginated list of all registered gateway address ids (HF22).
+  /// Paginated list of all registered gateway address ids (HF23).
   ///
   /// Inputs:
   /// - `from` -- pagination offset (default 0).
@@ -2740,7 +2740,7 @@ namespace cryptonote::rpc {
 
   /// RPC: gateway/get_gateway_history
   ///
-  /// Paginated transaction history for a gateway (HF22), height-ascending, read
+  /// Paginated transaction history for a gateway (HF23), height-ascending, read
   /// from the gateway transaction-history table. Lists every tx that touched the
   /// gateway: deposits, withdrawals, and descriptor (register/update) ops. This
   /// is what an exchange polls to reconcile deposits without scanning the chain.
@@ -2766,7 +2766,7 @@ namespace cryptonote::rpc {
 
   /// RPC: gateway/gateway_create_transfer
   ///
-  /// Admin-only. Builds an UNSIGNED pure-gateway withdrawal (HF22): spends from a
+  /// Admin-only. Builds an UNSIGNED pure-gateway withdrawal (HF23): spends from a
   /// source gateway's balance (txin_gateway) to one or more destination gateways
   /// (tx_out_gateway). Amounts are plaintext; the tx carries no RCT data. The
   /// gateway owner must sign `hash_to_sign` with the key type reported in
@@ -2893,8 +2893,8 @@ namespace cryptonote::rpc {
     BNS_RESOLVE,
     BNS_LOOKUP,
     BNS_VALUE_DECRYPT,
-    GET_ASSET_INFO,
-    GET_ASSET_LIST,
+    GET_TOKEN_INFO,
+    GET_TOKEN_LIST,
     OUT_PEERS,
     GET_OUTPUT_DISTRIBUTION,
     POP_BLOCKS,

@@ -67,9 +67,9 @@
 #include "cryptonote_basic/cryptonote_format_utils.h"
 #include "cryptonote_basic/account.h"
 #include "cryptonote_basic/cryptonote_basic_impl.h"
+#include "cryptonote_core/token_history_utils.h"
 #include "cryptonote_core/gateway_utils.h"
 #include "cryptonote_core/cryptonote_tx_utils.h"
-#include "cryptonote_core/asset_history_utils.h"
 #include "cryptonote_core/uptime_proof.h"
 #include "net/parse.h"
 #include "crypto/hash.h"
@@ -708,6 +708,47 @@ namespace cryptonote::rpc {
       void operator()(const tx_extra_merge_mining_tag& x) { set("mm_depth", x.depth); set("mm_root", x.merkle_root); }
       void operator()(const tx_extra_additional_pub_keys& x) { set("additional_pubkeys", x.data); }
       void operator()(const tx_extra_burn& x) { set("burn_amount", x.amount); }
+      static const char* token_op_type_name(token_descriptor_operation_type type) {
+        switch (type)
+        {
+          case token_descriptor_operation_type::register_token: return "register";
+          case token_descriptor_operation_type::mint_token: return "mint";
+          case token_descriptor_operation_type::update_token: return "update";
+          case token_descriptor_operation_type::burn_token: return "burn_token";
+          case token_descriptor_operation_type::undefined:
+          case token_descriptor_operation_type::_count: return "undefined";
+        }
+        return "unknown";
+      }
+      void operator()(const tx_extra_token_descriptor_operation& x) {
+        json tdo{
+          {"version", x.version},
+          {"operation_type", token_op_type_name(x.operation_type)},
+          {"fields", x.fields}
+        };
+        if (x.field_is_set(token_field_token_id))
+          tdo["token_id"] = tools::type_to_hex(x.token_id);
+        if (x.field_is_set(token_field_amount_commitment))
+          tdo["amount_commitment"] = tools::type_to_hex(x.amount_commitment);
+        if (x.field_is_set(token_field_amount))
+          tdo["amount"] = x.amount;
+        if (x.field_is_set(token_field_token_id_salt))
+          tdo["token_id_salt"] = x.token_id_salt;
+        if (x.field_is_set(token_field_descriptor))
+        {
+          tdo["descriptor"] = json{
+            {"version", x.descriptor.version},
+            {"ticker", x.descriptor.ticker},
+            {"full_name", x.descriptor.full_name},
+            {"meta_info", x.descriptor.meta_info},
+            {"owner", tools::type_to_hex(x.descriptor.owner)},
+            {"total_max_supply", x.descriptor.total_max_supply},
+            {"current_supply", x.descriptor.current_supply},
+            {"decimal_point", x.descriptor.decimal_point}
+          };
+        }
+        set("token", std::move(tdo));
+      }
       void operator()(const tx_extra_gateway_descriptor_operation& x) {
         json gw{
             {"version", x.version},
@@ -731,47 +772,6 @@ namespace cryptonote::rpc {
         }, x.descriptor.owner_key);
 
         set("gateway_descriptor", std::move(gw));
-      }
-      static const char* asset_op_type_name(asset_descriptor_operation_type type) {
-        switch (type)
-        {
-          case asset_descriptor_operation_type::register_asset: return "register";
-          case asset_descriptor_operation_type::emit_asset: return "emit";
-          case asset_descriptor_operation_type::update_asset: return "update";
-          case asset_descriptor_operation_type::burn_asset: return "burn_asset";
-          case asset_descriptor_operation_type::undefined:
-          case asset_descriptor_operation_type::_count: return "undefined";
-        }
-        return "unknown";
-      }
-      void operator()(const tx_extra_asset_descriptor_operation& x) {
-        json ado{
-          {"version", x.version},
-          {"operation_type", asset_op_type_name(x.operation_type)},
-          {"fields", x.fields}
-        };
-        if (x.field_is_set(asset_field_asset_id))
-          ado["asset_id"] = tools::type_to_hex(x.asset_id);
-        if (x.field_is_set(asset_field_amount_commitment))
-          ado["amount_commitment"] = tools::type_to_hex(x.amount_commitment);
-        if (x.field_is_set(asset_field_amount))
-          ado["amount"] = x.amount;
-        if (x.field_is_set(asset_field_asset_id_salt))
-          ado["asset_id_salt"] = x.asset_id_salt;
-        if (x.field_is_set(asset_field_descriptor))
-        {
-          ado["descriptor"] = json{
-            {"version", x.descriptor.version},
-            {"ticker", x.descriptor.ticker},
-            {"full_name", x.descriptor.full_name},
-            {"meta_info", x.descriptor.meta_info},
-            {"owner", tools::type_to_hex(x.descriptor.owner)},
-            {"total_max_supply", x.descriptor.total_max_supply},
-            {"current_supply", x.descriptor.current_supply},
-            {"decimal_point", x.descriptor.decimal_point}
-          };
-        }
-        set("asset", std::move(ado));
       }
       void operator()(const tx_extra_master_node_winner& x) { set("mn_winner", x.m_master_node_key); }
       void operator()(const tx_extra_master_node_pubkey& x) { set("mn_pubkey", x.m_master_node_key); }
@@ -2682,11 +2682,11 @@ namespace cryptonote::rpc {
       for (uint64_t amount: req.amounts)
       {
         for (auto [otype, ftype] : {std::pair{output_distribution_type::native, uint8_t{1}},
-                                    std::pair{output_distribution_type::asset,  uint8_t{2}}})
+                                    std::pair{output_distribution_type::token,  uint8_t{2}}})
         {
           // Must call m_core directly (not detail::get_output_distribution) because the shared
           // cache in detail:: does not key on otype — a native cache hit would return an empty
-          // output_indices vector for the asset bucket, causing an infinite loop in the wallet.
+          // output_indices vector for the token bucket, causing an infinite loop in the wallet.
           std::vector<uint64_t> dist, indices;
           uint64_t start_height = 0, base = 0;
           if (!m_core.get_output_distribution(amount, req.from_height, req_to_height, start_height, dist, base, otype, &indices))
@@ -3656,7 +3656,7 @@ namespace cryptonote::rpc {
 
       auto balances = json::array();
       for (const auto& b : acct.balances)
-        balances.push_back(json{{"asset_id", tools::type_to_hex(b.asset_id)}, {"amount", b.amount}});
+        balances.push_back(json{{"token_id", tools::type_to_hex(b.token_id)}, {"amount", b.amount}});
       cmd.response["balances"] = std::move(balances);
     }
     cmd.response["status"] = STATUS_OK;
@@ -3773,10 +3773,10 @@ namespace cryptonote::rpc {
       total += req.amounts[i];
     }
 
-    // Balance pre-check against the node's current state (null_aid = native BDX).
+    // Balance pre-check against the node's current state (null_tid = native BDX).
     uint64_t balance = 0;
     for (const auto& b : acct.balances)
-      if (b.asset_id == crypto::null_aid) balance = b.amount;
+      if (b.token_id == crypto::null_tid) balance = b.amount;
     if (req.fee > std::numeric_limits<uint64_t>::max() - total || balance < total + req.fee)
       throw rpc_error{ERROR_WRONG_PARAM, "insufficient gateway balance for withdrawal + fee"};
 
@@ -4022,30 +4022,30 @@ namespace cryptonote::rpc {
     value_decrypt.response["status"] = STATUS_OK;
   }
 
-  // ── HF21 Confidential Asset RPC handlers ─────────────────────────────────
+  // ── HF22 Private Token RPC handlers ─────────────────────────────────
 
-  void core_rpc_server::invoke(GET_ASSET_INFO& req_resp, rpc_context /*context*/)
+  void core_rpc_server::invoke(GET_TOKEN_INFO& req_resp, rpc_context /*context*/)
   {
     auto& req  = req_resp.request;
     auto& resp = req_resp.response;
 
-    if (req.asset_id.size() != 64 || !oxenc::is_hex(req.asset_id))
-      throw rpc_error{ERROR_WRONG_PARAM, "asset_id must be a 64-character hex string"};
+    if (req.token_id.size() != 64 || !oxenc::is_hex(req.token_id))
+      throw rpc_error{ERROR_WRONG_PARAM, "token_id must be a 64-character hex string"};
 
-    crypto::asset_id asset_id{};
-    if (!tools::hex_to_type(req.asset_id, asset_id))
-      throw rpc_error{ERROR_WRONG_PARAM, "Failed to parse asset_id"};
+    crypto::token_id token_id{};
+    if (!tools::hex_to_type(req.token_id, token_id))
+      throw rpc_error{ERROR_WRONG_PARAM, "Failed to parse token_id"};
 
     auto& db = m_core.get_blockchain_storage().get_db();
-    if (!db.asset_exists(asset_id))
-      throw rpc_error{ERROR_WRONG_PARAM, "Asset not found: " + req.asset_id};
+    if (!db.token_exists(token_id))
+      throw rpc_error{ERROR_WRONG_PARAM, "Token not found: " + req.token_id};
 
     std::string reason;
-    cryptonote::asset_consensus_state state{};
-    if (!cryptonote::load_asset_state_from_history(db, asset_id, state, reason))
-      throw rpc_error{ERROR_INTERNAL, "Failed to load asset state: " + reason};
+    cryptonote::token_consensus_state state{};
+    if (!cryptonote::load_token_state_from_history(db, token_id, state, reason))
+      throw rpc_error{ERROR_INTERNAL, "Failed to load token state: " + reason};
 
-    resp["asset_id"]         = req.asset_id;
+    resp["token_id"]         = req.token_id;
     resp["ticker"]           = state.descriptor.ticker;
     resp["full_name"]        = state.descriptor.full_name;
     resp["owner"]            = tools::type_to_hex(state.descriptor.owner);
@@ -4056,22 +4056,22 @@ namespace cryptonote::rpc {
     resp["status"]           = STATUS_OK;
   }
 
-  void core_rpc_server::invoke(GET_ASSET_LIST& req_resp, rpc_context /*context*/)
+  void core_rpc_server::invoke(GET_TOKEN_LIST& req_resp, rpc_context /*context*/)
   {
     auto& req  = req_resp.request;
     auto& resp = req_resp.response;
 
     auto& db = m_core.get_blockchain_storage().get_db();
-    const auto all_ids = db.get_all_asset_ids();
+    const auto all_ids = db.get_all_token_ids();
 
     const uint64_t offset = req.offset;
     const uint64_t count  = req.count;
 
-    nlohmann::json asset_ids = nlohmann::json::array();
+    nlohmann::json token_ids = nlohmann::json::array();
     for (uint64_t i = offset; i < all_ids.size() && i < offset + count; ++i)
-      asset_ids.push_back(tools::type_to_hex(all_ids[i]));
+      token_ids.push_back(tools::type_to_hex(all_ids[i]));
 
-    resp["asset_ids"]    = std::move(asset_ids);
+    resp["token_ids"]    = std::move(token_ids);
     resp["total_count"]  = all_ids.size();
     resp["status"]       = STATUS_OK;
   }

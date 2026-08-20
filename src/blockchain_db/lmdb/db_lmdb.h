@@ -82,7 +82,7 @@ struct mdb_txn_cursors
   MDB_cursor *gateway_accounts;
   MDB_cursor *gateway_tx_history;
   MDB_cursor *properties;
-  MDB_cursor *asset_histories;
+  MDB_cursor *token_histories;
 };
 
 struct mdb_rflags
@@ -112,7 +112,7 @@ struct mdb_rflags
   bool m_rf_gateway_accounts;
   bool m_rf_gateway_tx_history;
   bool m_rf_properties;
-  bool m_rf_asset_histories;
+  bool m_rf_token_histories;
 };
 
 struct mdb_threadinfo
@@ -436,7 +436,6 @@ private:
   void migrate_5_6();
   void migrate_6_7();
   void migrate_7_8();
-  void migrate_8_9();
 
   void cleanup_batch();
 
@@ -449,11 +448,11 @@ private:
   void set_master_node_proof(const crypto::public_key& pubkey, const master_nodes::proof_info& proof) override;
   std::unordered_map<crypto::public_key, master_nodes::proof_info> get_all_master_node_proofs() const override;
   bool remove_master_node_proof(const crypto::public_key& pubkey) override;
-  void set_asset_history(const crypto::asset_id &asset_id, const std::string &data) override;
-  bool get_asset_history(const crypto::asset_id &asset_id, std::string &data) const override;
-  bool remove_asset_history(const crypto::asset_id& asset_id) override;
-  bool asset_exists(const crypto::asset_id &asset_id) const override;
-  std::vector<crypto::asset_id> get_all_asset_ids() const override;
+  void set_token_history(const crypto::token_id &token_id, const std::string &data) override;
+  bool get_token_history(const crypto::token_id &token_id, std::string &data) const override;
+  bool remove_token_history(const crypto::token_id& token_id) override;
+  bool token_exists(const crypto::token_id &token_id) const override;
+  std::vector<crypto::token_id> get_all_token_ids() const override;
 
   void set_gateway_account(const crypto::public_key& gateway_addr, const std::string& data) override;
   bool get_gateway_account(const crypto::public_key& gateway_addr, std::string& data) const override;
@@ -503,10 +502,10 @@ private:
 
   MDB_dbi m_master_node_data;
   MDB_dbi m_master_node_proofs;
-  MDB_dbi m_asset_histories;
+  MDB_dbi m_token_histories;
 
-  MDB_dbi m_gateway_accounts; // HF22: gateway_addr -> serialized gateway_account_data
-  MDB_dbi m_gateway_tx_history; // HF22: gateway_addr -> (height||tx_hash) entries (DUPSORT)
+  MDB_dbi m_gateway_accounts; // HF23: gateway_addr -> serialized gateway_account_data
+  MDB_dbi m_gateway_tx_history; // HF23: gateway_addr -> (height||tx_hash) entries (DUPSORT)
 
   MDB_dbi m_properties;
 

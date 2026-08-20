@@ -222,15 +222,16 @@ namespace cryptonote
     else
     {
       if (tx.type != txtype::standard && tx.type != txtype::stake && tx.type != txtype::coin_burn
-          && tx.type != txtype::register_gateway_address && tx.type != txtype::update_gateway_address
-          && tx.type != txtype::deploy_new_asset && tx.type != txtype::emit_asset && tx.type != txtype::update_asset && tx.type != txtype::burn_asset)
+          && tx.type != txtype::register_private_token && tx.type != txtype::mint_token
+          && tx.type != txtype::update_token && tx.type != txtype::burn_token
+          && tx.type != txtype::register_gateway_address && tx.type != txtype::update_gateway_address)
       {
         // NOTE(beldex): This is a developer error. If we come across this in production, be conservative and just reject
         MERROR("Unrecognised transaction type: " << tx.type << " for tx: " << get_transaction_hash(tx));
         return true;
       }
       // Gateway register/update duplicate detection is handled by the tx-pool
-      // gateway tracker (pending-register set + per-(gateway,asset) spends).
+      // gateway tracker (pending-register set + per-(gateway,token) spends).
     }
 
     return false;
@@ -257,11 +258,11 @@ namespace cryptonote
       return false;
     }
 
-    // HF22: gateway withdrawal inputs (txin_gateway) carry no key image, so the
+    // HF23: gateway withdrawal inputs (txin_gateway) carry no key image, so the
     // flash quorum has nothing to lock against a double-spend and cannot back
     // the instant-finality guarantee. Refuse to admit such a tx on the flash
     // path; it must go through normal confirmation (where the per-(gateway,
-    // asset) pool overdraft tracker and block-apply underflow check protect it).
+    // token) pool overdraft tracker and block-apply underflow check protect it).
     if (opts.approved_flash && tx.has_gateway_inputs())
     {
       LOG_PRINT_L1("gateway-input tx " << id << " cannot be accepted as a flash tx (keyless inputs are not flash-lockable)");
@@ -886,7 +887,7 @@ namespace cryptonote
     for(const auto& in: tx.vin)
     {
       // HF22: gateway withdrawal inputs carry no key image; their double-spend
-      // protection is the per-(gateway,asset) tracker (insert_gateway_spends).
+      // protection is the per-(gateway,token) tracker (insert_gateway_spends).
       if (std::holds_alternative<txin_gateway>(in))
         continue;
       const crypto::key_image& ki = get_input_key_image(in);
@@ -974,12 +975,12 @@ namespace cryptonote
       }
     }
 
-    // Sum this tx's withdrawal needs per (gateway, asset).
-    std::map<std::pair<crypto::public_key, crypto::asset_id>, uint64_t> need;
+    // Sum this tx's withdrawal needs per (gateway, token).
+    std::map<std::pair<crypto::public_key, crypto::token_id>, uint64_t> need;
     for (const auto& in : tx.vin)
       if (const auto* g = std::get_if<txin_gateway>(&in))
       {
-        auto& amount = need[{g->gateway_addr, g->asset_id}];
+        auto& amount = need[{g->gateway_addr, g->token_id}];
         if (amount > std::numeric_limits<uint64_t>::max() - g->amount)
         {
           reason = "gateway withdrawal amount overflow";
@@ -1028,10 +1029,10 @@ namespace cryptonote
         op.op_type == gateway_descriptor_op_type::register_address)
       m_gateway_pending_registers.erase(op.address_id);
 
-    std::map<std::pair<crypto::public_key, crypto::asset_id>, uint64_t> need;
+    std::map<std::pair<crypto::public_key, crypto::token_id>, uint64_t> need;
     for (const auto& in : tx.vin)
       if (const auto* g = std::get_if<txin_gateway>(&in))
-        need[{g->gateway_addr, g->asset_id}] += g->amount;
+        need[{g->gateway_addr, g->token_id}] += g->amount;
 
     for (const auto& [gk, amount] : need)
     {

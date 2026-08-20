@@ -102,12 +102,12 @@ namespace tools::wallet_rpc {
       KV_MAP_SERIALIZABLE
     };
 
-    // HF21: per-asset balance entry
-    struct asset_balance_entry
+    // HF22: per-token balance entry
+    struct token_balance_entry
     {
-      std::string asset_id;           // Hex-encoded asset pubkey
-      std::string ticker;             // Asset ticker symbol (e.g. "TKN")
-      uint64_t    balance;            // Total balance (atomic units of the asset)
+      std::string token_id;           // Hex-encoded token pubkey
+      std::string ticker;             // Token ticker symbol (e.g. "TKN")
+      uint64_t    balance;            // Total balance (atomic units of the token)
       uint64_t    unlocked_balance;   // Spendable balance
 
       KV_MAP_SERIALIZABLE
@@ -124,7 +124,7 @@ namespace tools::wallet_rpc {
       uint64_t num_unspent_outputs; // Number of unspent outputs available for the subaddress.
       uint64_t blocks_to_unlock;    // The number of blocks remaining for the balance to unlock
       uint64_t time_to_unlock;      // Timestamp of expected unlock
-      std::vector<asset_balance_entry> asset_balances; // HF21: per-asset balances for this subaddress
+      std::vector<token_balance_entry> token_balances; // HF22: per-token balances for this subaddress
 
       KV_MAP_SERIALIZABLE
     };
@@ -138,8 +138,8 @@ namespace tools::wallet_rpc {
       std::vector<per_subaddress_info> per_subaddress; // Balance information for each subaddress in an account.
       uint64_t blocks_to_unlock;                       // The number of blocks remaining for the balance to unlock
       uint64_t   time_to_unlock;                       // Timestamp of expected unlock
-      // HF21: per-asset balances (empty for wallets with no confidential asset outputs)
-      std::vector<asset_balance_entry> asset_balances;
+      // HF22: per-token balances (empty for wallets with no private token outputs)
+      std::vector<token_balance_entry> token_balances;
 
       KV_MAP_SERIALIZABLE
     };
@@ -843,6 +843,7 @@ namespace tools::wallet_rpc {
     uint64_t block_height;                      // Block height the transfer occurred on
     bool frozen;                                // If the output has been intentionally frozen by the user, i.e. unspendable.
     bool unlocked;                              // If the TX is spendable yet
+    uint64_t unlock_time;                       // Per-output unlock height/timestamp for this transfer.
 
     KV_MAP_SERIALIZABLE
   };
@@ -1066,10 +1067,10 @@ BELDEX_RPC_DOC_INTROSPECT
     };
   };
 
-  struct asset_received_entry
+  struct token_received_entry
   {
-    std::string asset_id; // Hex-encoded asset ID
-    uint64_t amount;      // Amount of the asset received
+    std::string token_id; // Hex-encoded token ID
+    uint64_t amount;      // Amount of the token received
 
     KV_MAP_SERIALIZABLE
   };
@@ -1092,7 +1093,7 @@ BELDEX_RPC_DOC_INTROSPECT
     struct response
     {
       uint64_t received;      // Amount of the native transaction.
-      std::vector<asset_received_entry> asset_received; // Amount of assets received
+      std::vector<token_received_entry> token_received; // Amount of tokens received
       bool in_pool;           // States if the transaction is still in pool or has been added to a block.
       uint64_t confirmations; // Number of block mined after the one with the transaction.
 
@@ -1143,7 +1144,7 @@ BELDEX_RPC_DOC_INTROSPECT
     {
       bool good;              // States if the inputs proves the transaction.
       uint64_t received;      // Amount of the transaction.
-      std::vector<asset_received_entry> asset_received; // Amount of assets received
+      std::vector<token_received_entry> token_received; // Amount of tokens received
       bool in_pool;           // States if the transaction is still in pool or has been added to a block.
       uint64_t confirmations; // Number of block mined after the one with the transaction.
 
@@ -2325,19 +2326,20 @@ For more information on updating and signing see the BNS_UPDATE_MAPPING document
   };
 
   BELDEX_RPC_DOC_INTROSPECT
-  // Register a gateway address (HF22).
+  // Register a gateway address (HF23).
   struct GATEWAY_REGISTER_ADDRESS : RESTRICTED
   {
     static constexpr auto names() { return NAMES("register_gateway_address"); }
 
     static constexpr const char *description =
-R"(Register a gateway address (HF22). Builds a transaction that burns the gateway
+R"(Register a gateway address (HF23). Builds a transaction that burns the gateway
 registration fee and stores the descriptor (owner key + meta) on-chain. The
 gateway is thereafter operated via the owner key.)";
 
     struct request
     {
-      std::string        gateway_secret;   // 64-char hex SECRET key of the gateway id. The id (pubkey) is derived from it and the register tx is self-signed with it to prove control of the id.
+      // The gateway id is this wallet's view public key (and the register tx is
+      // self-signed with the wallet's view secret key); it is not part of the request.
       std::string        owner_key_type;   // Owner key type: "schnorr" (native), "eth" (secp256k1), or "eddsa".
       std::string        owner_key;        // Hex owner key (64 for schnorr/eddsa, 66 for eth-compressed).
       std::string        meta_info;        // (Optional) descriptor meta string.
@@ -2643,17 +2645,17 @@ This command is only required if the open wallet is one of the owners of a BNS r
     };
   };
 
-  // HF21: Deploy a new confidential asset on-chain.
-  struct DEPLOY_NEW_ASSET : RESTRICTED
+  // HF22: Register a new private token on-chain.
+  struct REGISTER_PRIVATE_TOKEN : RESTRICTED
   {
-    static constexpr auto names() { return NAMES("deploy_new_asset"); }
+    static constexpr auto names() { return NAMES("register_private_token"); }
     static constexpr const char* description =
-        "Deploy a new confidential asset. Pass the path to a JSON descriptor file containing: "
+        "Register a new private token. Pass a JSON descriptor containing: "
         "ticker, full_name, total_max_supply, current_supply, decimal_point, meta_info.";
 
     struct request
     {
-      std::string json_string;                // Inline asset JSON descriptor
+      std::string json_string;                // Inline token JSON descriptor
       uint32_t account_index = 0;             // Account to use for fees
       uint32_t priority = 0;                  // Transaction priority
       std::set<uint32_t> subaddr_indices;     // (Optional) Subaddresses to use for fees
@@ -2666,8 +2668,8 @@ This command is only required if the open wallet is one of the owners of a BNS r
 
     struct response
     {
-      std::string asset_id;       // Hex-encoded calculated asset ID
-      std::string tx_hash;        // Transaction hash of the deploy tx
+      std::string token_id;       // Hex-encoded calculated token ID
+      std::string tx_hash;        // Transaction hash of the registration tx
       std::string tx_key;         // Transaction key (if requested)
       std::string tx_hex;         // Transaction hex blob (if requested)
       std::string ticker;         // Confirmed ticker from descriptor
@@ -2679,20 +2681,20 @@ This command is only required if the open wallet is one of the owners of a BNS r
   };
 
   BELDEX_RPC_DOC_INTROSPECT
-  // HF21: Get a list of assets created by the wallet
-  struct GET_OWNED_ASSETS : RESTRICTED
+  // HF22: Get a list of tokens created by the wallet
+  struct GET_OWNED_TOKENS : RESTRICTED
   {
-    static constexpr auto names() { return NAMES("get_owned_assets"); }
+    static constexpr auto names() { return NAMES("get_owned_tokens"); }
 
     struct request {
       std::string owner;          // Optional wallet address or spend public key hex to filter by owner
       KV_MAP_SERIALIZABLE
     };
 
-    struct asset_info {
-      std::string asset_id;        // Hex-encoded asset public key
-      std::string full_name;       // Asset full name
-      std::string ticker;          // Asset ticker symbol
+    struct token_info {
+      std::string token_id;        // Hex-encoded token public key
+      std::string full_name;       // Token full name
+      std::string ticker;          // Token ticker symbol
       uint64_t max_supply;
       uint64_t current_supply;
       uint8_t  decimal_point;
@@ -2702,19 +2704,19 @@ This command is only required if the open wallet is one of the owners of a BNS r
     };
 
     struct response {
-      std::vector<asset_info> assets;
+      std::vector<token_info> tokens;
       KV_MAP_SERIALIZABLE
     };
   };
 
-  // HF21: Emit additional tokens for an existing confidential asset.
-  struct EMIT_ASSET : RESTRICTED
+  // HF22: Mint additional tokens for an existing private token.
+  struct MINT_TOKEN : RESTRICTED
   {
-    static constexpr auto names() { return NAMES("emit_asset"); }
+    static constexpr auto names() { return NAMES("mint_token"); }
 
     struct request
     {
-      std::string asset_id;        // Hex-encoded asset ID
+      std::string token_id;        // Hex-encoded token ID
       uint64_t amount;             // Amount to mint (in atomic units)
       uint32_t priority;           // Transaction priority
       uint32_t account_index;      // (Optional) Index of the account to pay for the transaction fees. (defaults to 0)
@@ -2738,14 +2740,14 @@ This command is only required if the open wallet is one of the owners of a BNS r
     };
   };
 
-  // HF21: Burn supply from an existing confidential asset.
-  struct BURN_ASSET : RESTRICTED
+  // HF22: Burn supply from an existing private token.
+  struct BURN_TOKEN : RESTRICTED
   {
-    static constexpr auto names() { return NAMES("burn_asset"); }
+    static constexpr auto names() { return NAMES("burn_token"); }
 
     struct request
     {
-      std::string asset_id;        // Hex-encoded asset ID
+      std::string token_id;        // Hex-encoded token ID
       uint64_t amount;             // Amount to burn (in atomic units)
       uint32_t priority;           // Transaction priority
       uint32_t account_index;      // (Optional) Index of the account to pay for the transaction fees. (defaults to 0)
@@ -2769,16 +2771,16 @@ This command is only required if the open wallet is one of the owners of a BNS r
     };
   };
 
-  // HF21: Update an existing confidential asset metadata.
-  struct UPDATE_ASSET : RESTRICTED
+  // HF22: Update an existing private token metadata.
+  struct UPDATE_TOKEN : RESTRICTED
   {
-    static constexpr auto names() { return NAMES("update_asset"); }
+    static constexpr auto names() { return NAMES("update_token"); }
 
     struct request
     {
-      std::string asset_id;        // Hex-encoded asset ID
-      std::string json_filename;   // Path to the asset JSON descriptor file containing metadata to update
-      std::string json_string;     // Inline asset JSON descriptor
+      std::string token_id;        // Hex-encoded token ID
+      std::string json_filename;   // Path to the token JSON descriptor file containing metadata to update
+      std::string json_string;     // Inline token JSON descriptor
       uint32_t priority;           // Transaction priority
       uint32_t account_index;      // (Optional) Index of the account to pay for the transaction fees. (defaults to 0)
       std::set<uint32_t> subaddr_indices; // (Optional) List of subaddresses to pay for the transaction fees.
@@ -2907,11 +2909,11 @@ This command is only required if the open wallet is one of the owners of a BNS r
     BNS_DECRYPT_VALUE,
     BNS_ENCRYPT_VALUE,
     COIN_BURN,
-    DEPLOY_NEW_ASSET,
-    GET_OWNED_ASSETS,
-    EMIT_ASSET,
-    BURN_ASSET,
-    UPDATE_ASSET
+    REGISTER_PRIVATE_TOKEN,
+    GET_OWNED_TOKENS,
+    MINT_TOKEN,
+    BURN_TOKEN,
+    UPDATE_TOKEN
   >;
 
 }

@@ -701,10 +701,10 @@ namespace cryptonote
     //! container for spent key images from the transactions in the pool
     key_images_container m_spent_key_images;
 
-    //! HF22: cumulative pending gateway withdrawal amounts per (gateway, asset)
+    //! HF23: cumulative pending gateway withdrawal amounts per (gateway, token)
     //! for pool txs (gateway inputs have no key image), and pending register ops.
     //! Prevents pool-level overdraw / duplicate registration.
-    std::map<std::pair<crypto::public_key, crypto::asset_id>, uint64_t> m_gateway_pending_spends;
+    std::map<std::pair<crypto::public_key, crypto::token_id>, uint64_t> m_gateway_pending_spends;
     std::set<crypto::public_key> m_gateway_pending_registers;
 
     //! Track / untrack a pool tx's gateway withdrawals and register op. insert

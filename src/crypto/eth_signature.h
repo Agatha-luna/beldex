@@ -1,7 +1,7 @@
 // Copyright (c) 2024, The Beldex Project
 // Ported from the Zano Project (MIT/X11), src/crypto/eth_signature.{h,cpp}.
 //
-// secp256k1 ETH-style ECDSA signatures for gateway addresses (HF22).
+// secp256k1 ETH-style ECDSA signatures for gateway addresses (HF23).
 //
 // One of the three gateway owner-key custody types, for external ETH-style
 // MPC/TSS custody. The daemon only ever *verifies*: a 64-byte compact ECDSA

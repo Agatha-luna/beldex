@@ -57,11 +57,11 @@ inline constexpr uint64_t TX_OUTPUT_DECOYS                     = 9;
 inline constexpr size_t   TX_BULLETPROOF_MAX_OUTPUTS           = 16;
 inline constexpr size_t   TX_BULLETPROOF_PLUS_MAX_OUTPUTS      = 16;
 
-// ── Confidential asset ring design (HF21+) ─────────────────────────────────
+// ── Private token ring design (HF22+) ─────────────────────────────────
 //
 // Zarcanum inputs (spending a tx_out_zarcanum) use the SAME output_amounts[0]
 // pool as native BDX RingCT outputs for decoy selection.  Both BDX RCT outputs
-// (txout_to_key) and confidential asset outputs (tx_out_zarcanum) store
+// (txout_to_key) and private token outputs (tx_out_zarcanum) store
 // tx_out.amount == 0 on-chain, so they live in the same LMDB bucket.
 //
 // The CLSAG ring is 1-layer (key only):
@@ -69,32 +69,32 @@ inline constexpr size_t   TX_BULLETPROOF_PLUS_MAX_OUTPUTS      = 16;
 //   - ZC decoy   → ring member pubkey = tx_out_zarcanum.stealth_address
 //   - ZC real    → ring member pubkey = tx_out_zarcanum.stealth_address
 //
-// Amount balance and asset integrity are proven separately:
+// Amount balance and token integrity are proven separately:
 //   - Balance:   linear_composition_proof  (proves tx balances in G and X)
-//   - Asset:     BGE surjection proof       (proves output asset is real)
+//   - Token:     BGE surjection proof       (proves output token is real)
 //   - Range:     BulletproofPlus            (proves amounts in [0, 2^64))
 //
-// Result: no bootstrapping problem — day-1 asset transfers can draw decoys
+// Result: no bootstrapping problem — day-1 token transfers can draw decoys
 // from the existing BDX output pool (millions of outputs available).
-inline constexpr size_t ASSET_RING_SIZE = TX_OUTPUT_DECOYS; // same as BDX
+inline constexpr size_t TOKEN_RING_SIZE = TX_OUTPUT_DECOYS; // same as BDX
 
-// ── Mandatory fan-out for deploy / emit transactions (HF21+) ───────────────
+// ── Mandatory fan-out for deploy / mint transactions (HF22+) ───────────────
 //
-// Every deploy_new_asset or emit_asset transaction MUST produce at least
-// MIN_ASSET_EMISSION_OUTPUTS tx_out_zarcanum outputs.
+// Every register_private_token or mint_token transaction MUST produce at least
+// MIN_TOKEN_MINT_OUTPUTS tx_out_zarcanum outputs.
 //
 // Why: even though the ring draws from the shared BDX pool, we want
-// dedicated ZC ring members for future asset-specific BGE proofs.
+// dedicated ZC ring members for future token-specific BGE proofs.
 // The wallet auto-generates self-send outputs (to its own subaddresses)
 // to reach this minimum whenever the user's destinations fall short.
 //
 // Value = TX_OUTPUT_DECOYS + 1 = 10: guarantees a full ring of 9 decoys
 // + 1 real is always achievable using only prior ZC outputs of the same
-// asset, independent of the BDX pool.
-inline constexpr size_t MIN_ASSET_EMISSION_OUTPUTS = TX_OUTPUT_DECOYS + 1; // 10
+// token, independent of the BDX pool.
+inline constexpr size_t MIN_TOKEN_MINT_OUTPUTS = TX_OUTPUT_DECOYS + 1; // 10
 inline constexpr uint64_t PUBLIC_ADDRESS_TEXTBLOB_VER          = 0;
 
-// Gateway address (HF22) registration fee, burned via the coin_burn /
+// Gateway address (HF23) registration fee, burned via the coin_burn /
 // TX_EXTRA_TAG_BURN machinery. 100 BDX (COIN = 10^9 atomic units). Spelled as a
 // literal here because beldex_economy.h (which defines COIN) includes this file.
 inline constexpr uint64_t GATEWAY_ADDRESS_REGISTRATION_FEE     = UINT64_C(100000000000); // 100 * pow(10, 9)
@@ -172,13 +172,13 @@ namespace hashkey {
   inline constexpr std::string_view CLSAG_ROUND = "CLSAG_round"sv;
   inline constexpr std::string_view CLSAG_AGG_0 = "CLSAG_agg_0"sv;
   inline constexpr std::string_view CLSAG_AGG_1 = "CLSAG_agg_1"sv;
-  // Gateway address (HF22) domain separators.
+  // Gateway address (HF23) domain separators.
   inline constexpr std::string_view GW_INPUT_SIG    = "gateway_input_sig"sv;    // withdrawal input signature message
   inline constexpr std::string_view GW_OWNERSHIP    = "gateway_ownership"sv;    // descriptor-update ownership proof message
   inline constexpr std::string_view GW_OUT_PID_MASK = "gateway_out_pid_mask"sv; // integrated-address payment-id encryption mask
   inline constexpr std::string_view GW_BALANCE      = "gateway_balance"sv;      // gw→wallet withdrawal balance-proof message
   // 3-layer CLSAG-GGX (zarcanum ZC_sig): layer 0 = stealth address (G),
-  // layer 1 = amount commitment (G), layer 2 = blinded asset id (X).
+  // layer 1 = amount commitment (G), layer 2 = blinded token id (X).
   inline constexpr std::string_view CLSAG_GGX_ROUND = "CLSAG_GGX_round"sv;
   inline constexpr std::string_view CLSAG_GGX_AGG_0 = "CLSAG_GGX_agg_0"sv;
   inline constexpr std::string_view CLSAG_GGX_AGG_1 = "CLSAG_GGX_agg_1"sv;
@@ -271,7 +271,7 @@ enum class hf : uint8_t
     hf19_enhance_bns, // provided EVM address in BNS
     hf20_bulletproof_plus,
     hf21_bulletproof_plus,
-    hf22_confidential_assets, // Confidential custom asset transfers
+    hf22_private_tokens, // Private custom token transfers (formerly confidential assets)
     hf23_gateway_addresses, // Account-model gateway addresses for exchanges/bridges/DEXes
 
     _next,
@@ -304,7 +304,7 @@ namespace feature {
   constexpr auto CLSAG                        = hf::hf15_flash;
   constexpr auto PROOF_BTENC                  = hf::hf18_bns;
   constexpr auto BULLETPROOF_PLUS             = hf::hf20_bulletproof_plus;
-  constexpr auto CONFIDENTIAL_ASSETS          = hf::hf22_confidential_assets;
+  constexpr auto PRIVATE_TOKENS               = hf::hf22_private_tokens;
   constexpr auto GATEWAY_ADDRESSES            = hf::hf23_gateway_addresses;
 }
 
@@ -385,7 +385,7 @@ namespace config
   inline constexpr uint64_t PUBLIC_ADDRESS_BASE58_PREFIX = 0xd1;
   inline constexpr uint64_t PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX = 19;
   inline constexpr uint64_t PUBLIC_SUBADDRESS_BASE58_PREFIX = 42;
-  // Gateway address (HF22) prefixes. The numeric tag drives the leading base58
+  // Gateway address (HF23) prefixes. The numeric tag drives the leading base58
   // glyphs; these were computed so every mainnet gateway address renders with a
   // provably-stable `gwB…` / `gwiB…` prefix (the first base58 block is
   // varint(tag)+pubkey-prefix, and fixed-width base58 preserves order).
@@ -422,7 +422,7 @@ namespace config
     inline constexpr uint64_t PUBLIC_ADDRESS_BASE58_PREFIX = 53;
     inline constexpr uint64_t PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX = 54;
     inline constexpr uint64_t PUBLIC_SUBADDRESS_BASE58_PREFIX = 63;
-    // Gateway address (HF22) prefixes — render `gwT…` / `gwiT…` (network-distinct
+    // Gateway address (HF23) prefixes — render `gwT…` / `gwiT…` (network-distinct
     // from mainnet to prevent cross-network address confusion).
     inline constexpr uint64_t PUBLIC_GATEWAY_ADDRESS_BASE58_PREFIX = 0xf63ee; // gwT…
     inline constexpr uint64_t PUBLIC_INTEGRATED_GATEWAY_ADDRESS_BASE58_PREFIX = 0x11276e; // gwiT…
@@ -455,7 +455,7 @@ namespace config
     inline constexpr uint64_t PUBLIC_ADDRESS_BASE58_PREFIX = 24; // ~ dV1 .. dV3
     inline constexpr uint64_t PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX = 25; // ~ dVA .. dVC
     inline constexpr uint64_t PUBLIC_SUBADDRESS_BASE58_PREFIX = 36; // ~dVa .. dVc
-    // Gateway address (HF22) prefixes — render `gwD…` / `gwiD…` (network-distinct
+    // Gateway address (HF23) prefixes — render `gwD…` / `gwiD…` (network-distinct
     // from mainnet to prevent cross-network address confusion).
     inline constexpr uint64_t PUBLIC_GATEWAY_ADDRESS_BASE58_PREFIX = 0x60ee; // gwD…
     inline constexpr uint64_t PUBLIC_INTEGRATED_GATEWAY_ADDRESS_BASE58_PREFIX = 0xa276e; // gwiD…

@@ -1,8 +1,8 @@
 // Copyright (c) 2024, The Beldex Project
 //
-// Gateway address (HF22) consensus-state helpers. Mirrors the layout of the
-// confidential-asset branch's asset_history_utils so the two sit side by side
-// after merge. Descriptor history is append-only (like the CA asset op history);
+// Gateway address (HF23) consensus-state helpers. Mirrors the layout of the
+// private-token branch's token_history_utils so the two sit side by side
+// after merge. Descriptor history is append-only (like the token op history);
 // balances are materialized with exact-inverse rewind (deposits/withdrawals are
 // unbounded, so no replay-from-history). This milestone covers the register /
 // update descriptor operations; deposit/withdrawal balance mutation is layered
@@ -91,8 +91,8 @@ bool tx_has_gateway_constructs(const transaction& tx);
 
 // Full per-tx gateway validation against current DB state (called from
 // check_tx_inputs): descriptor ops (register/update), deposits (tx_out_gateway)
-// and withdrawals (txin_gateway sig + balance). `hf_version` gates HF22 rules
-// (e.g. asset_id == null_aid). Order-matched gateway_input_sig verification and
+// and withdrawals (txin_gateway sig + balance). `hf_version` gates HF23 rules
+// (e.g. token_id == null_tid). Order-matched gateway_input_sig verification and
 // a pre-apply balance-sufficiency check are done here; the authoritative
 // under/overflow check happens in append at block-apply time.
 bool validate_tx_gateway_operations_against_db(BlockchainDB& db, network_type nettype, const transaction& tx,
@@ -124,7 +124,7 @@ bool verify_gateway_wallet_balance(const transaction& tx, std::string& reason);
 
 // Net transparent gateway commitment for the native RCT balance equation:
 //   Σ gw_out·H − Σ gw_in·H − mask_point (mask_point only on gw→wallet
-// withdrawals; generator from asset_id; null_aid → H).
+// withdrawals; generator from token_id; null_tid → H).
 // Added to the output side so sum(pseudoOuts) == sum(outPk) + fee·H + offset.
 rct::key gateway_balance_offset(const transaction& tx);
 

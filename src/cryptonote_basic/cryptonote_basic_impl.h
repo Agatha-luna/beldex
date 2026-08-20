@@ -140,7 +140,7 @@ namespace cryptonote {
     , const std::string_view str
     );
 
-  // Gateway address (HF22) base58 encoding. The blob is the 32-byte gateway id
+  // Gateway address (HF23) base58 encoding. The blob is the 32-byte gateway id
   // (== registrant view pubkey), plus an 8-byte payment id for the integrated
   // form. Renders as gwB…/gwiB… (per-network prefixes in cryptonote_config.h).
   std::string get_gateway_address_as_str(network_type nettype, const crypto::public_key& gateway_id);

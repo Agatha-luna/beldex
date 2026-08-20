@@ -47,8 +47,8 @@ static constexpr std::array mainnet_hard_forks =
   hard_fork{hf::hf19_enhance_bns,       0,  3546545, 1725514200 }, // Thursday, September 5, 2024 5:30:00 AM (UTC)
   hard_fork{hf::hf20_bulletproof_plus,  0,  4939540, 1765105200 }, // Sunday, December 7, 2025 4:30:00 AM (UTC)
   hard_fork{hf::hf21_bulletproof_plus,  0,  5518799, 1782501791 }, // Sunday, December 7, 2025 4:30:00 AM (UTC)
-  hard_fork{hf::hf22_confidential_assets, 0, 99999999, 9999999999 }, // TBD: mainnet height pending testnet validation
-  // Pending — no hf23_gateway_addresses entry yet; add once CA has activated and a gateway height is chosen.
+  hard_fork{hf::hf22_private_tokens, 0, 99999999, 9999999999 }, // TBD: mainnet height pending testnet validation
+  // Pending — no hf23_gateway_addresses entry yet; add once private tokens have activated and a gateway height is chosen.
 };
 
 static constexpr std::array testnet_hard_forks =
@@ -64,8 +64,8 @@ static constexpr std::array testnet_hard_forks =
   hard_fork{hf::hf19_enhance_bns,       0,  100, 1723447800 }, // Monday, Aug 12, 2024 7:30:00 AM
   hard_fork{hf::hf20_bulletproof_plus,  0,  110, 1761388200 }, // Saturday, Oct 25, 2025 10:30:00 AM
   hard_fork{hf::hf21_bulletproof_plus,  0,  120, 1782501791 }, // Sunday, December 7, 2025 4:30:00 AM (UTC)
-  hard_fork{hf::hf22_confidential_assets, 0, 130, 1790000000 }, // Sunday, December 7, 2025 4:30:00 AM (UTC)
-  hard_fork{hf::hf23_gateway_addresses,  0,  140, 9999999900 }, // TBD: testnet activation block TBD
+  hard_fork{hf::hf22_private_tokens,    0, 130, 1790000000 }, // Sunday, December 7, 2025 4:30:00 AM (UTC)
+  hard_fork{hf::hf23_gateway_addresses, 0, 140, 9999999900 }, // TBD: testnet activation block TBD
 };
 
 static constexpr std::array devnet_hard_forks =
@@ -81,7 +81,7 @@ static constexpr std::array devnet_hard_forks =
   hard_fork{hf::hf19_enhance_bns,        0,   9,  1599848400 },
   hard_fork{hf::hf20_bulletproof_plus,   0,  10,  1599848400 },
   hard_fork{hf::hf21_bulletproof_plus,   0,  11,  1599848400 },
-  hard_fork{hf::hf22_confidential_assets, 0,  12,  1599848400 },
+  hard_fork{hf::hf22_private_tokens,     0,  12,  1599848400 },
   // Pending — no hf23_gateway_addresses entry yet.
 };
 

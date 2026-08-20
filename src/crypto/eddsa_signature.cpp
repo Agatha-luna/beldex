@@ -1,6 +1,6 @@
 // Copyright (c) 2024, The Beldex Project
 //
-// RFC-8032 Ed25519 verification for gateway addresses (HF22), over libsodium.
+// RFC-8032 Ed25519 verification for gateway addresses (HF23), over libsodium.
 
 #include "eddsa_signature.h"
 

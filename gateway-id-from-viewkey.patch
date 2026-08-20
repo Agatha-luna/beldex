@@ -15,8 +15,8 @@ index bde9e4710..ba5f0a7a4 100755
    m_cmd_binder.set_handler("register_gateway_address",
                             [this](const auto& x) { return register_gateway_address(x); },
                             tr(USAGE_REGISTER_GATEWAY_ADDRESS),
--                           tr("Register a gateway address (HF22). Burns the registration fee and stores the owner key on-chain. The gateway id is derived from <gateway_secret_hex> and the tx is self-signed with it to prove control of the id. Args: <gateway_secret_hex> <owner_type> <owner_key_hex> [meta]."));
-+                           tr("Register a gateway address (HF22). Burns the registration fee and stores the owner key on-chain. The gateway id is this wallet's view public key and the tx is self-signed with the wallet's view secret key to prove control of the id. Args: <owner_type> <owner_key_hex> [meta]."));
+-                           tr("Register a gateway address (HF23). Burns the registration fee and stores the owner key on-chain. The gateway id is derived from <gateway_secret_hex> and the tx is self-signed with it to prove control of the id. Args: <gateway_secret_hex> <owner_type> <owner_key_hex> [meta]."));
++                           tr("Register a gateway address (HF23). Burns the registration fee and stores the owner key on-chain. The gateway id is this wallet's view public key and the tx is self-signed with the wallet's view secret key to prove control of the id. Args: <owner_type> <owner_key_hex> [meta]."));
  
    m_cmd_binder.set_handler("bns_renew_mapping",
                             [this](const auto& x) { return bns_renew_mapping(x); },
@@ -150,7 +150,7 @@ index 6eebc97d1..b464d756a 100755
 +++ b/src/wallet/wallet2.h
 @@ -1412,13 +1412,15 @@ private:
  
-     // Gateway address (HF22) registration: builds a tx that burns
+     // Gateway address (HF23) registration: builds a tx that burns
      // GATEWAY_ADDRESS_REGISTRATION_FEE and carries a register descriptor op in
 -    // tx_extra. `gateway_skey` is the SECRET key of the on-chain gateway id: the
 -    // id (pubkey) is derived from it, and the tx is self-signed with it to prove

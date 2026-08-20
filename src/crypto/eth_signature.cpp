@@ -1,7 +1,7 @@
 // Copyright (c) 2024, The Beldex Project
 // Ported from the Zano Project (MIT/X11), src/crypto/eth_signature.cpp.
 //
-// secp256k1 ETH-style ECDSA verification for gateway addresses (HF22).
+// secp256k1 ETH-style ECDSA verification for gateway addresses (HF23).
 
 #include "eth_signature.h"
 

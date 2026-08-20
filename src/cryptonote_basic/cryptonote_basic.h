@@ -94,41 +94,14 @@ namespace cryptonote
     crypto::public_key key;
   };
 
-  // Gateway address (HF22): the on-chain identity of a gateway account. It is
-  // the registrant's view_pub_key — both the account id and the DH key used to
-  // decrypt integrated-address payment ids.
-  using gateway_address_id = crypto::public_key;
-
-  // Gateway deposit output (HF22). Transparent: destination, asset and amount
-  // are all visible; the payment_id is encrypted (XOR with a mask derived from
-  // the DH shared secret 8·r·V_gw) so only the gateway owner can map deposits
-  // to customers. asset_id == crypto::null_aid means native BDX (permanent
-  // sentinel; HF22 consensus rejects any non-null asset_id).
-  struct tx_out_gateway
-  {
-    uint8_t version = 0;
-    gateway_address_id gateway_addr;
-    crypto::asset_id asset_id;   // null_aid = native BDX
-    uint64_t amount = 0;         // PLAINTEXT
-    uint64_t payment_id = 0;     // ENCRYPTED (integrated addresses); 0 otherwise
-
-    BEGIN_SERIALIZE_OBJECT()
-      FIELD(version)
-      FIELD(gateway_addr)
-      FIELD(asset_id)
-      VARINT_FIELD(amount)
-      VARINT_FIELD(payment_id)
-    END_SERIALIZE()
-  };
-
-  // Confidential asset output (HF23+).
-  // Carries a blinded asset ID and a Pedersen amount commitment; the plaintext
-  // amount and asset identity are only recoverable by the recipient.
+  // Private token output (HF22+).
+  // Carries a blinded token ID and a Pedersen amount commitment; the plaintext
+  // amount and token identity are only recoverable by the recipient.
   struct tx_out_zarcanum
   {
     crypto::public_key stealth_address   = crypto::null_pkey; // one-time stealth address
-    crypto::public_key amount_commitment = crypto::null_pkey; // C = amount*T + mask*G (T = blinded_asset_id)
-    crypto::asset_id   blinded_asset_id  = crypto::null_aid; // T = asset_id + r*X
+    crypto::public_key amount_commitment = crypto::null_pkey; // C = amount*T + mask*G (T = blinded_token_id)
+    crypto::token_id   blinded_token_id  = crypto::null_tid; // T = token_id + r*X
     uint64_t           encrypted_amount  = 0;                 // amount XOR H_s("enc"||derivation||idx)
     uint8_t            mix_attr          = 0;
     uint8_t            version           = 0;
@@ -136,10 +109,37 @@ namespace cryptonote
     BEGIN_SERIALIZE_OBJECT()
       FIELD(stealth_address)
       FIELD(amount_commitment)
-      FIELD(blinded_asset_id)
+      FIELD(blinded_token_id)
       VARINT_FIELD(encrypted_amount)
       FIELD(mix_attr)
       FIELD(version)
+    END_SERIALIZE()
+  };
+
+  // Gateway address (HF23): the on-chain identity of a gateway account. It is
+  // the registrant's view_pub_key — both the account id and the DH key used to
+  // decrypt integrated-address payment ids.
+  using gateway_address_id = crypto::public_key;
+
+  // Gateway deposit output (HF23). Transparent: destination, token and amount
+  // are all visible; the payment_id is encrypted (XOR with a mask derived from
+  // the DH shared secret 8·r·V_gw) so only the gateway owner can map deposits
+  // to customers. token_id == crypto::null_tid means native BDX (permanent
+  // sentinel; HF23 consensus rejects any non-null token_id).
+  struct tx_out_gateway
+  {
+    uint8_t version = 0;
+    gateway_address_id gateway_addr;
+    crypto::token_id token_id;   // null_tid = native BDX
+    uint64_t amount = 0;         // PLAINTEXT
+    uint64_t payment_id = 0;     // ENCRYPTED (integrated addresses); 0 otherwise
+
+    BEGIN_SERIALIZE_OBJECT()
+      FIELD(version)
+      FIELD(gateway_addr)
+      FIELD(token_id)
+      VARINT_FIELD(amount)
+      VARINT_FIELD(payment_id)
     END_SERIALIZE()
   };
 
@@ -196,28 +196,8 @@ namespace cryptonote
     END_SERIALIZE()
   };
 
-  // Gateway withdrawal input (HF22). Authorized by a plain owner signature over
-  // the tx prefix hash (carried in transaction::gateway_proofs), NOT a ring
-  // signature — there is no key image and no decoys. Balance sufficiency is
-  // checked against the gateway's on-chain balance. asset_id == null_aid =
-  // native BDX (HF22 rejects non-null).
-  struct txin_gateway
-  {
-    uint8_t version = 0;
-    gateway_address_id gateway_addr;
-    crypto::asset_id asset_id;   // null_aid = native BDX
-    uint64_t amount = 0;
-
-    BEGIN_SERIALIZE_OBJECT()
-      FIELD(version)
-      FIELD(gateway_addr)
-      FIELD(asset_id)
-      VARINT_FIELD(amount)
-    END_SERIALIZE()
-  };
-
-  // Confidential-asset/ZC input scaffold. This variant is introduced so tx construction and
-  // verification code can progressively adopt CA-specific signing/proof logic without changing
+  // Private-token/ZC input scaffold. This variant is introduced so tx construction and
+  // verification code can progressively adopt PT-specific signing/proof logic without changing
   // legacy txin_to_key semantics.
   struct txin_zc_input
   {
@@ -230,8 +210,28 @@ namespace cryptonote
     END_SERIALIZE()
   };
 
+  // Gateway withdrawal input (HF23). Authorized by a plain owner signature over
+  // the tx prefix hash (carried in transaction::gateway_proofs), NOT a ring
+  // signature — there is no key image and no decoys. Balance sufficiency is
+  // checked against the gateway's on-chain balance. token_id == null_tid =
+  // native BDX (HF23 rejects non-null).
+  struct txin_gateway
+  {
+    uint8_t version = 0;
+    gateway_address_id gateway_addr;
+    crypto::token_id token_id;   // null_tid = native BDX
+    uint64_t amount = 0;
 
-  // NOTE: the confidential-asset branch (txin_zc_input / tx_out_zarcanum) takes
+    BEGIN_SERIALIZE_OBJECT()
+      FIELD(version)
+      FIELD(gateway_addr)
+      FIELD(token_id)
+      VARINT_FIELD(amount)
+    END_SERIALIZE()
+  };
+
+
+  // NOTE: the private-token branch (txin_zc_input / tx_out_zarcanum) takes
   // variant tag 0x3 and gateway takes 0x4. The on-wire tags are assigned
   // explicitly via VARIANT_TAG below, independent of std::variant member order.
   // See docs/GATEWAY_ADDRESS_PLAN.md §6.
@@ -239,9 +239,9 @@ namespace cryptonote
 
   using txout_target_v = std::variant<txout_to_script, txout_to_scripthash, txout_to_key, tx_out_zarcanum, tx_out_gateway>;
 
-  // ---- Gateway address (HF22) owner keys, descriptors and proofs ----------
+  // ---- Gateway address (HF23) owner keys, descriptors and proofs ----------
   // The gateway owner key authorizes spends and descriptor updates. All three
-  // custody types ship at HF22; verification dispatches on the stored owner-key
+  // custody types ship at HF23; verification dispatches on the stored owner-key
   // alternative and requires the matching signature alternative.
   //   0 = Beldex-native ed25519 + plain Schnorr
   //   1 = secp256k1 compressed, ETH-style compact ECDSA
@@ -320,19 +320,19 @@ namespace cryptonote
   };
 
   // Gateway proof vector element. Tags 0xc0+ so the vector can later be unified
-  // with the CA branch's asset_proofs (0xb0-0xb5) without collision.
+  // with the private-token branch's token_proofs (0xb0-0xb5) without collision.
   using gateway_proof_v = std::variant<gateway_input_sig, gateway_ownership_proof, gateway_balance_proof>;
 
-  // Per-asset gateway balance. A vector (not a std::map) because the generic
-  // container serializer doesn't support std::map, and HF22 only ever stores the
-  // single null_aid (native BDX) entry anyway. Kept asset-keyed for the CA fork.
+  // Per-token gateway balance. A vector (not a std::map) because the generic
+  // container serializer doesn't support std::map, and HF23 only ever stores the
+  // single null_tid (native BDX) entry anyway. Kept token-keyed for future tokens.
   struct gateway_balance_entry
   {
-    crypto::asset_id asset_id; // null_aid = native BDX
+    crypto::token_id token_id; // null_tid = native BDX
     uint64_t amount = 0;
 
     BEGIN_SERIALIZE_OBJECT()
-      FIELD(asset_id)
+      FIELD(token_id)
       VARINT_FIELD(amount)
     END_SERIALIZE()
   };
@@ -356,10 +356,10 @@ namespace cryptonote
     // Latest (authoritative) descriptor. Callers must ensure history is non-empty.
     const gateway_descriptor_base& latest_descriptor() const { return descriptor_history.back(); }
 
-    // Balance for an asset (0 if absent).
-    uint64_t balance_for(const crypto::asset_id& aid) const {
+    // Balance for a token (0 if absent).
+    uint64_t balance_for(const crypto::token_id& tid) const {
       for (const auto& b : balances)
-        if (b.asset_id == aid) return b.amount;
+        if (b.token_id == tid) return b.amount;
       return 0;
     }
   };
@@ -397,7 +397,7 @@ namespace cryptonote
     txversion version;
     txtype type;
 
-    bool is_transfer() const { return type == txtype::standard || type == txtype::stake || type == txtype::beldex_name_system || type == txtype::coin_burn || type == txtype::register_gateway_address || type == txtype::update_gateway_address || type == txtype::deploy_new_asset || type == txtype::emit_asset || type == txtype::update_asset || type == txtype::burn_asset; }
+    bool is_transfer() const { return type == txtype::standard || type == txtype::stake || type == txtype::beldex_name_system || type == txtype::coin_burn || type == txtype::register_private_token || type == txtype::mint_token || type == txtype::update_token || type == txtype::burn_token || type == txtype::register_gateway_address || type == txtype::update_gateway_address; }
 
     // not used after version 2, but remains for compatibility
     uint64_t unlock_time;  //number of block (or time), used as a limitation like: spend this tx not early then block/time
@@ -458,24 +458,23 @@ namespace cryptonote
     std::vector<std::vector<crypto::signature>> signatures; //count signatures  always the same as inputs count
     rct::rctSig rct_signatures;
 
-    // Gateway proofs (HF22). Present only for txs that contain gateway inputs
-    // (one gateway_input_sig per txin_gateway) or that are update_gateway_address
-    // txs (one gateway_ownership_proof). Empty otherwise. Prunable, like CLSAGs.
-    // Mirrors how the CA branch adds transaction::asset_proofs.
-    std::vector<gateway_proof_v> gateway_proofs;
-
-    // Confidential asset input signatures (HF23+): one entry per confidential
+    // Private token input signatures (HF22+): one entry per confidential
     // (zarcanum) input being spent, in tx.vin order. Each is a signature_v (a
     // variant currently holding only ZC_sig), so it serializes as
     // { "ZC_sig": {...} } inside the tx "signatures" array -- matching Zano,
-    // where ZC_sig is a signature_v rather than a proof_v. NOT in asset_proofs.
+    // where ZC_sig is a signature_v rather than a proof_v. NOT in token_proofs.
     std::vector<rct::signature_v> zc_sig;
 
-    // Confidential asset proofs (HF23+). Empty for non-asset transactions.
-    // Contains: zc_asset_surjection_proof, zc_balance_proof,
-    //           asset_operation_proof, asset_operation_ownership_proof,
+    // Gateway proofs (HF23). Present only for txs that contain gateway inputs
+    // (one gateway_input_sig per txin_gateway) or that are update_gateway_address
+    // txs (one gateway_ownership_proof). Empty otherwise. Prunable, like CLSAGs.
+    std::vector<gateway_proof_v> gateway_proofs;
+
+    // Private token proofs (HF22+). Empty for non-token transactions.
+    // Contains: zc_token_surjection_proof, zc_balance_proof,
+    //           token_operation_proof, token_operation_ownership_proof,
     //           zc_outs_range_proof.
-    std::vector<rct::asset_proof_v> asset_proofs;
+    std::vector<rct::token_proof_v> token_proofs;
 
     // hash cache
     mutable crypto::hash hash;
@@ -486,19 +485,19 @@ namespace cryptonote
     std::atomic<unsigned int> unprunable_size;
     std::atomic<unsigned int> prefix_size;
 
+    // Returns true if any output is a tx_out_zarcanum (private token).
+    bool has_zarcanum_outputs() const {
+      return std::any_of(vout.begin(), vout.end(),
+        [](const tx_out& o){ return std::holds_alternative<tx_out_zarcanum>(o.target); });
+    }
+
     // True if any input is a gateway withdrawal (txin_gateway).
     bool has_gateway_inputs() const {
       return std::any_of(vin.begin(), vin.end(),
         [](const txin_v& i){ return std::holds_alternative<txin_gateway>(i); });
     }
 
-    // Returns true if any output is a tx_out_zarcanum (confidential asset).
-    bool has_zarcanum_outputs() const {
-      return std::any_of(vout.begin(), vout.end(),
-        [](const tx_out& o){ return std::holds_alternative<tx_out_zarcanum>(o.target); });
-    }
-
-    // Returns true if any input is a txin_zc_input (confidential asset spend).
+    // Returns true if any input is a txin_zc_input (private token spend).
     // Prefix-derivable, so it decides whether the tx carries a zc_sig
     // ("signatures") section on the wire -- for well-formed txs this equals
     // !zc_sig.empty() (one ZC_sig per zc input).
@@ -573,14 +572,14 @@ namespace cryptonote
       {
         if (!vin.empty())
         {
-          // Native RCT input/output counts exclude the transparent gateway
-          // (HF22) and confidential-asset zarcanum (HF23) inputs/outputs:
-          //  - Gateway inputs (txin_gateway) and zarcanum inputs (txin_zc_input)
+          // Native RCT input/output counts exclude the private-token zarcanum
+          // (HF22) and transparent gateway (HF23) inputs/outputs:
+          //  - Zarcanum inputs (txin_zc_input) and gateway inputs (txin_gateway)
           //    carry no native CLSAG/pseudoOut, so the pseudoOuts/CLSAG arrays are
           //    sized to the native (txin_to_key) input count only.
-          //  - Gateway outputs (tx_out_gateway) are transparent and zarcanum
-          //    outputs (tx_out_zarcanum) carry their own commitments/range proofs
-          //    in asset_proofs, so both are excluded from the RCT
+          //  - Zarcanum outputs (tx_out_zarcanum) carry their own commitments/range
+          //    proofs in token_proofs, and gateway outputs (tx_out_gateway) are
+          //    transparent, so both are excluded from the RCT
           //    outPk/ecdhInfo/range-proof arrays (mirrors expand_transaction_1).
           // Pre-HF22/23 txs have only native inputs/outputs, so these equal
           // vin.size()/vout.size() and the change is behavior-preserving.
@@ -625,7 +624,7 @@ namespace cryptonote
                 first_native ? first_native->key_offsets.size() - 1 : 0);
           }
 
-          // Gateway proofs (HF22). Presence is fully determined by deterministic
+          // Gateway proofs (HF23). Presence is fully determined by deterministic
           // fields available on both read and write (gateway inputs / tx type),
           // so read and write stay symmetric without relying on the vector state.
           // Present when the tx has gateway withdrawal inputs (one input sig each,
@@ -635,6 +634,9 @@ namespace cryptonote
           // id itself, proving the registrant controls the id — F2). The vector is
           // length-prefixed, so a mixed [balance_proof, input_sig] payload
           // round-trips without a separate count. Prunable region, like RCT above.
+          // Emitted first (before the private-token signatures/proofs below);
+          // this order and each gate must match calculate_transaction_prunable_hash
+          // exactly, or the prunable hash won't reproduce.
           if (!pruned && (has_gateway_inputs() || type == txtype::update_gateway_address
               || type == txtype::register_gateway_address))
           {
@@ -642,13 +644,13 @@ namespace cryptonote
             serialization::value(ar, gateway_proofs);
           }
 
-          // HF23: confidential asset input signatures. Emitted under the
+          // HF22: private token input signatures. Emitted under the
           // "signatures" tag, as a signature_v vector (each a { "ZC_sig": {...} })
           // -- keeping ZC_sig with the tx's signatures rather than lumped into
-          // the asset proofs, as Zano does. Present only when the tx spends a
+          // the token proofs, as Zano does. Present only when the tx spends a
           // zarcanum input; the gate is prefix-derivable (has_zarcanum_inputs)
           // so the deserializer knows whether to read the field, and a tx with
-          // no zc inputs (e.g. deploy_new_asset) omits it entirely rather than
+          // no zc inputs (e.g. register_private_token) omits it entirely rather than
           // serializing an empty array. This gate and order must stay identical
           // in calculate_transaction_prunable_hash or the prunable hash won't
           // reproduce.
@@ -658,15 +660,15 @@ namespace cryptonote
             serialization::value(ar, zc_sig);
           }
 
-          // HF23: confidential asset proofs (present when has_zarcanum_outputs()
-          // or for update_asset/burn_asset txs). Burn-all transactions can
+          // HF22: private token proofs (present when has_zarcanum_outputs()
+          // or for update_token/burn_token txs). Burn-all transactions can
           // consume confidential inputs without producing any confidential
           // outputs, so the tx type must participate in the deserialization
           // gate or the trailing proof bytes will be left unread.
-          if (!asset_proofs.empty() || has_zarcanum_outputs() || type == txtype::update_asset || type == txtype::burn_asset)
+          if (!token_proofs.empty() || has_zarcanum_outputs() || type == txtype::update_token || type == txtype::burn_token)
           {
-            ar.tag("asset_proofs");
-            serialization::value(ar, asset_proofs);
+            ar.tag("token_proofs");
+            serialization::value(ar, token_proofs);
           }
         }
       }
@@ -683,8 +685,8 @@ namespace cryptonote
       {
         if (!vin.empty())
         {
-          // Native RCT arrays exclude the transparent gateway (HF22) and
-          // zarcanum (HF23) inputs/outputs; size them to the native input /
+          // Native RCT arrays exclude the transparent gateway (HF23) and
+          // zarcanum (HF22) inputs/outputs; size them to the native input /
           // native output counts (matching the full serializer above).
           // Behaviour-preserving pre-HF22/23.
           size_t native_inputs = 0;
@@ -881,7 +883,7 @@ namespace cryptonote
   {
     txtype result = txtype::standard;
     if      (hf_version >= feature::GATEWAY_ADDRESSES) result = txtype::update_gateway_address;
-    else if (hf_version >= hf::hf22_confidential_assets) result = txtype::burn_asset;
+    else if (hf_version >= feature::PRIVATE_TOKENS)     result = txtype::burn_token;
     else if (hf_version >= hf::hf18_bns)              result = txtype::coin_burn;
     else if (hf_version >= hf::hf16)                  result = txtype::beldex_name_system;
     else if (hf_version >= hf::hf15_flash)            result = txtype::stake;
@@ -913,12 +915,12 @@ namespace cryptonote
       case txtype::stake:                   return "stake";
       case txtype::beldex_name_system:      return "beldex_name_system";
       case txtype::coin_burn:               return "coin_burn";
+      case txtype::register_private_token:  return "register_private_token";
+      case txtype::mint_token:              return "mint_token";
+      case txtype::update_token:            return "update_token";
+      case txtype::burn_token:              return "burn_token";
       case txtype::register_gateway_address: return "register_gateway_address";
       case txtype::update_gateway_address:  return "update_gateway_address";
-      case txtype::deploy_new_asset:        return "deploy_new_asset";
-      case txtype::emit_asset:              return "emit_asset";
-      case txtype::update_asset:            return "update_asset";
-      case txtype::burn_asset:              return "burn_asset";
       default: assert(false);               return "xx_unhandled_type";
     }
   }

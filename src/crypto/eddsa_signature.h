@@ -1,6 +1,6 @@
 // Copyright (c) 2024, The Beldex Project
 //
-// RFC-8032 Ed25519 (PureEdDSA) signatures for gateway addresses (HF22).
+// RFC-8032 Ed25519 (PureEdDSA) signatures for gateway addresses (HF23).
 //
 // One of the three gateway owner-key custody types. EdDSA owners are external
 // (MPC/TSS / RFC-8032 signers); the daemon only ever *verifies*. This is a thin

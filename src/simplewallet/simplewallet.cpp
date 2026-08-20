@@ -52,7 +52,6 @@
 #include <unordered_map>
 #include <ctype.h>
 #include <string_view>
-#include <regex>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
 #include <boost/format.hpp>
@@ -71,14 +70,12 @@
 #include "cryptonote_core/master_node_list.h"
 #include "cryptonote_core/beldex_name_system.h"
 #include "simplewallet.h"
-#include "cryptonote_basic/asset_descriptor_operation_utils.h"
+#include "cryptonote_basic/token_descriptor.h"
+#include "cryptonote_basic/token_descriptor_operation_utils.h"
 #include "cryptonote_basic/cryptonote_format_utils.h"
 #include "rpc/core_rpc_server_commands_defs.h"
 #include "crypto/crypto.h"  // for crypto::secret_key definition
 #include "mnemonics/electrum-words.h"
-#include "rapidjson/document.h"
-#include "rapidjson/stringbuffer.h"
-#include "rapidjson/writer.h"
 #include "common/json_util.h"
 #include "ringct/rctSigs.h"
 #include "multisig/multisig.h"
@@ -133,169 +130,75 @@ using sw = cryptonote::simple_wallet;
 
 namespace
 {
-  // ── Asset deployment helpers ──────────────────────────────────────────────
-
-  bool validate_asset_ticker(const std::string& ticker)
-  {
-    static const std::regex asset_ticker_regexp{R"([A-Za-z0-9]{1,14})"};
-    return std::regex_match(ticker, asset_ticker_regexp);
-  }
-
-  bool validate_asset_full_name(const std::string& full_name)
-  {
-    static const std::regex asset_full_name_regexp{R"([A-Za-z0-9.,:!?\-() ]{0,400})"};
-    return std::regex_match(full_name, asset_full_name_regexp);
-  }
-
-  bool validate_asset_descriptor_for_deploy(const cryptonote::asset_descriptor_base& descriptor, std::string& error)
-  {
-    if (!validate_asset_ticker(descriptor.ticker))
-    { error = sw::tr("ticker is invalid; expected 1-14 alphanumeric characters"); return false; }
-    if (!validate_asset_full_name(descriptor.full_name))
-    { error = sw::tr("full_name contains unsupported characters"); return false; }
-    if (descriptor.decimal_point > 18)
-    { error = sw::tr("decimal_point must be <= 18"); return false; }
-    if (descriptor.current_supply > descriptor.total_max_supply)
-    { error = sw::tr("current_supply cannot exceed total_max_supply"); return false; }
-    return true;
-  }
-
-  bool load_asset_descriptor_from_json_file(const fs::path& filename,
-                                             cryptonote::asset_descriptor_base& descriptor,
-                                             std::string& error)
-  {
-    std::string data;
-    if (!tools::slurp_file(filename, data))
-    { error = sw::tr("Failed to read asset specification file"); return false; }
-
-    rapidjson::Document json;
-    if (json.Parse(data.c_str()).HasParseError())
-    { error = sw::tr("Asset specification is not valid JSON"); return false; }
-    if (!json.IsObject())
-    { error = sw::tr("Asset specification root must be a JSON object"); return false; }
-
-    auto assign_string = [&](const char* f, std::string& t) -> bool {
-      if (!json.HasMember(f)) return true;
-      if (!json[f].IsString()) { error = std::string{f} + " must be a string"; return false; }
-      t = json[f].GetString(); return true;
-    };
-    auto assign_uint64 = [&](const char* f, uint64_t& t) -> bool {
-      if (!json.HasMember(f)) return true;
-      if (!json[f].IsUint64()) { error = std::string{f} + " must be an unsigned integer"; return false; }
-      t = json[f].GetUint64(); return true;
-    };
-    auto assign_uint8 = [&](const char* f, uint8_t& t) -> bool {
-      if (!json.HasMember(f)) return true;
-      if (!json[f].IsUint()) { error = std::string{f} + " must be an unsigned integer"; return false; }
-      unsigned p = json[f].GetUint();
-      if (p > std::numeric_limits<uint8_t>::max()) { error = std::string{f} + " is out of range"; return false; }
-      t = static_cast<uint8_t>(p); return true;
-    };
-    auto assign_bool = [&](const char* f, bool& t) -> bool {
-      if (!json.HasMember(f)) return true;
-      if (!json[f].IsBool()) { error = std::string{f} + " must be a boolean"; return false; }
-      t = json[f].GetBool(); return true;
-    };
-
-    if (!assign_uint8("version",          descriptor.version)         ||
-        !assign_uint64("total_max_supply", descriptor.total_max_supply)||
-        !assign_uint64("current_supply",   descriptor.current_supply)  ||
-        !assign_uint8("decimal_point",     descriptor.decimal_point)   ||
-        !assign_string("ticker",           descriptor.ticker)          ||
-        !assign_string("full_name",        descriptor.full_name)       ||
-        !assign_string("meta_info",        descriptor.meta_info))
-      return false;
-
-    if (json.HasMember("owner"))
-    {
-      const auto& owner = json["owner"];
-      if (!owner.IsString())
-      { error = sw::tr("owner must be a hex-encoded public key or address"); return false; }
-      std::string owner_str = owner.GetString();
-
-      cryptonote::address_parse_info owner_info;
-      if (cryptonote::get_account_address_from_str(owner_info, cryptonote::network_type::MAINNET, owner_str) ||
-          cryptonote::get_account_address_from_str(owner_info, cryptonote::network_type::TESTNET, owner_str))
-      {
-        if (owner_info.is_subaddress)
-        { error = sw::tr("owner cannot be a subaddress"); return false; }
-        descriptor.owner = owner_info.address.m_spend_public_key;
-      } else if (!tools::hex_to_type(owner_str, descriptor.owner)) {
-        error = sw::tr("owner must be a hex-encoded public key or valid address"); return false;
-      }
-    }
-    return validate_asset_descriptor_for_deploy(descriptor, error);
-  }
-
-  enum class asset_prefixed_address_mode
+  enum class token_prefixed_address_mode
   {
     plain_address,
     native_prefixed_address,
-    asset_prefixed_address,
+    token_prefixed_address,
   };
 
-  bool parse_asset_prefixed_address_arg(const std::string& raw, crypto::asset_id& asset_id, std::string& address, asset_prefixed_address_mode* mode = nullptr)
+  bool parse_token_prefixed_address_arg(const std::string& raw, crypto::token_id& token_id, std::string& address, token_prefixed_address_mode* mode = nullptr)
   {
     address = raw;
     if (mode)
-      *mode = asset_prefixed_address_mode::plain_address;
+      *mode = token_prefixed_address_mode::plain_address;
 
     const size_t sep = raw.find(':');
     if (sep == std::string::npos)
       return true;
 
-    const std::string asset_hex = raw.substr(0, sep);
+    const std::string token_hex = raw.substr(0, sep);
     std::string parsed_address = raw.substr(sep + 1);
-    if (asset_hex == "bdx" && !parsed_address.empty())
+    if (token_hex == "bdx" && !parsed_address.empty())
     {
-      asset_id = crypto::null_aid;
+      token_id = crypto::null_tid;
       address = std::move(parsed_address);
       if (mode)
-        *mode = asset_prefixed_address_mode::native_prefixed_address;
+        *mode = token_prefixed_address_mode::native_prefixed_address;
       return true;
     }
-    if (asset_hex.size() != 64 || parsed_address.empty())
-      return true; // not an asset-prefix format; keep legacy behavior
+    if (token_hex.size() != 64 || parsed_address.empty())
+      return true; // not an token-prefix format; keep legacy behavior
 
-    crypto::asset_id parsed_asset = crypto::null_aid;
-    if (!tools::hex_to_type(asset_hex, parsed_asset))
+    crypto::token_id parsed_token = crypto::null_tid;
+    if (!tools::hex_to_type(token_hex, parsed_token))
       return false;
 
-    asset_id = parsed_asset;
+    token_id = parsed_token;
     address = std::move(parsed_address);
     if (mode)
-      *mode = asset_prefixed_address_mode::asset_prefixed_address;
+      *mode = token_prefixed_address_mode::token_prefixed_address;
     return true;
   }
 
-  struct asset_display_info
+  struct token_display_info
   {
     uint8_t decimal_point = 0;
     std::string ticker;
   };
 
-  std::mutex asset_display_cache_mutex;
-  std::unordered_map<crypto::asset_id, std::optional<asset_display_info>> asset_display_cache;
+  std::mutex token_display_cache_mutex;
+  std::unordered_map<crypto::token_id, std::optional<token_display_info>> token_display_cache;
 
-  std::optional<asset_display_info> get_asset_display_info(tools::wallet2& wallet, const crypto::asset_id& asset_id)
+  std::optional<token_display_info> get_token_display_info(tools::wallet2& wallet, const crypto::token_id& token_id)
   {
     {
-      std::lock_guard lock{asset_display_cache_mutex};
-      auto it = asset_display_cache.find(asset_id);
-      if (it != asset_display_cache.end())
+      std::lock_guard lock{token_display_cache_mutex};
+      auto it = token_display_cache.find(token_id);
+      if (it != token_display_cache.end())
         return it->second;
     }
 
-    std::optional<asset_display_info> result;
+    std::optional<token_display_info> result;
     try
     {
-      const std::string asset_hex = tools::type_to_hex(asset_id);
-      const auto res = wallet.json_rpc("get_asset_info", {{"asset_id", asset_hex}});
+      const std::string token_hex = tools::type_to_hex(token_id);
+      const auto res = wallet.json_rpc("get_token_info", {{"token_id", token_hex}});
 
       if (!res.contains("decimal_point") || !res["decimal_point"].is_number_unsigned())
         return std::nullopt;
 
-      asset_display_info info{};
+      token_display_info info{};
       info.decimal_point = static_cast<uint8_t>(res["decimal_point"].get<unsigned>());
       if (res.contains("ticker") && res["ticker"].is_string())
         info.ticker = res["ticker"].get<std::string>();
@@ -306,24 +209,24 @@ namespace
       return std::nullopt;
     }
 
-    // Only cache successful lookups: the asset may not be registered on the
+    // Only cache successful lookups: the token may not be registered on the
     // daemon yet right after deployment, so a negative result must be retried
     // on the next call rather than sticking for the rest of the session.
     {
-      std::lock_guard lock{asset_display_cache_mutex};
-      asset_display_cache[asset_id] = result;
+      std::lock_guard lock{token_display_cache_mutex};
+      token_display_cache[token_id] = result;
     }
     return result;
   }
 
-  struct received_asset_info
+  struct received_token_info
   {
-    crypto::asset_id asset_id = crypto::null_aid;
+    crypto::token_id token_id = crypto::null_tid;
     uint8_t decimal_point = 0;
     std::string ticker;
   };
 
-  std::optional<received_asset_info> find_received_asset_info(
+  std::optional<received_token_info> find_received_token_info(
       tools::wallet2& wallet,
       const crypto::hash& txid,
       const std::optional<cryptonote::subaddress_index>& subaddr_index,
@@ -336,15 +239,15 @@ namespace
       if (td.m_txid != txid) continue;
       if (subaddr_index && td.m_subaddr_index != *subaddr_index) continue;
       if (td.m_amount != amount) continue;
-      if (unlock_time && td.m_tx.unlock_time != *unlock_time) continue;
-      if (td.m_asset_id == crypto::null_aid) continue;
+      if (unlock_time && td.m_tx.get_unlock_time(td.m_internal_output_index) != *unlock_time) continue;
+      if (td.m_token_id == crypto::null_tid) continue;
 
-      received_asset_info result{};
-      result.asset_id = td.m_asset_id;
-      if (const auto asset_info = get_asset_display_info(wallet, td.m_asset_id))
+      received_token_info result{};
+      result.token_id = td.m_token_id;
+      if (const auto token_info = get_token_display_info(wallet, td.m_token_id))
       {
-        result.decimal_point = asset_info->decimal_point;
-        result.ticker = asset_info->ticker;
+        result.decimal_point = token_info->decimal_point;
+        result.ticker = token_info->ticker;
       }
       return result;
     }
@@ -358,45 +261,45 @@ namespace
       const std::optional<cryptonote::subaddress_index>& subaddr_index,
       uint64_t amount,
       const std::optional<uint64_t>& unlock_time,
-      bool include_asset_id = false)
+      bool include_token_id = false)
   {
-    if (const auto asset_info = find_received_asset_info(wallet, txid, subaddr_index, amount, unlock_time))
+    if (const auto token_info = find_received_token_info(wallet, txid, subaddr_index, amount, unlock_time))
     {
-      std::string result = print_asset_amount(amount, asset_info->decimal_point);
-      if (!asset_info->ticker.empty())
-        result += " " + asset_info->ticker;
-      if (include_asset_id)
-        result += " [" + tools::type_to_hex(asset_info->asset_id) + "]";
+      std::string result = print_token_amount(amount, token_info->decimal_point);
+      if (!token_info->ticker.empty())
+        result += " " + token_info->ticker;
+      if (include_token_id)
+        result += " [" + tools::type_to_hex(token_info->token_id) + "]";
       return result;
     }
 
     return print_money(amount);
   }
 
-  std::string format_amount_with_asset_id(
+  std::string format_amount_with_token_id(
       tools::wallet2& wallet,
       uint64_t amount,
-      const std::string& asset_id_hex,
-      bool include_asset_id = false)
+      const std::string& token_id_hex,
+      bool include_token_id = false)
   {
-    if (asset_id_hex.empty())
+    if (token_id_hex.empty())
       return print_money(amount);
 
-    crypto::asset_id asset_id{};
-    if (!tools::hex_to_type(asset_id_hex, asset_id))
-      return std::to_string(amount) + " [" + asset_id_hex + "]";
+    crypto::token_id token_id{};
+    if (!tools::hex_to_type(token_id_hex, token_id))
+      return std::to_string(amount) + " [" + token_id_hex + "]";
 
-    if (const auto asset_info = get_asset_display_info(wallet, asset_id))
+    if (const auto token_info = get_token_display_info(wallet, token_id))
     {
-      std::string result = print_asset_amount(amount, asset_info->decimal_point);
-      if (!asset_info->ticker.empty())
-        result += " " + asset_info->ticker;
-      if (include_asset_id)
-        result += " [" + asset_id_hex + "]";
+      std::string result = print_token_amount(amount, token_info->decimal_point);
+      if (!token_info->ticker.empty())
+        result += " " + token_info->ticker;
+      if (include_token_id)
+        result += " [" + token_id_hex + "]";
       return result;
     }
 
-    return std::to_string(amount) + (include_asset_id ? " [" + asset_id_hex + "]" : "");
+    return std::to_string(amount) + (include_token_id ? " [" + token_id_hex + "]" : "");
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -431,14 +334,14 @@ namespace
   const char* USAGE_INCOMING_TRANSFERS("incoming_transfers [available|unavailable] [verbose] [uses] [index=<N1>[,<N2>[,...]]]");
   const char* USAGE_PAYMENTS("payments <PID_1> [<PID_2> ... <PID_N>]");
   const char* USAGE_PAYMENT_ID("payment_id");
-  const char* USAGE_TRANSFER("transfer [index=<N1>[,<N2>,...]] [flash|unimportant] (<URI> | <assetid:address> <amount>) [subtractfeefrom=<D0>[,<D1>,all,...]] [<payment_id>]");
+  const char* USAGE_TRANSFER("transfer [index=<N1>[,<N2>,...]] [flash|unimportant] (<URI> | <tokenid:address> <amount>) [subtractfeefrom=<D0>[,<D1>,all,...]] [<payment_id>]");
   const char* USAGE_LOCKED_TRANSFER("locked_transfer [index=<N1>[,<N2>,...]] [<priority>] (<URI> | <addr> <amount>) <lockblocks> [<payment_id (obsolete)>]");
-  const char* USAGE_LOCKED_SWEEP_ALL("locked_sweep_all [index=<N1>[,<N2>,...] | index=all] [<priority>] [<address|bdx:address|asset_id:address>] <lockblocks> [<payment_id (obsolete)>]");
-  const char* USAGE_SWEEP_ALL("sweep_all [index=<N1>[,<N2>,...] | index=all] [flash|unimportant] [outputs=<N>] [<address|bdx:address|asset_id:address> [<payment_id (obsolete)>]]");
-  const char* USAGE_SWEEP_BELOW("sweep_below <amount_threshold> [index=<N1>[,<N2>,...]] [flash|unimportant] [<address|bdx:address|asset_id:address> [<payment_id (obsolete)>]]");
-  const char* USAGE_SWEEP_SINGLE("sweep_single [flash|unimportant] [outputs=<N>] <key_image> <address|bdx:address|asset_id:address> [<payment_id (obsolete)>]");
-  const char* USAGE_SWEEP_UNMIXABLE("sweep_unmixable [<asset_id>]");
-  const char* USAGE_SWEEP_ACCOUNT("sweep_account <account> [index=<N1>[,<N2>,...] | index=all] [<priority>] [<ring_size>] [outputs=<N>] <address|bdx:address|asset_id:address> [<payment_id (obsolete)>]");
+  const char* USAGE_LOCKED_SWEEP_ALL("locked_sweep_all [index=<N1>[,<N2>,...] | index=all] [<priority>] [<address|bdx:address|token_id:address>] <lockblocks> [<payment_id (obsolete)>]");
+  const char* USAGE_SWEEP_ALL("sweep_all [index=<N1>[,<N2>,...] | index=all] [flash|unimportant] [outputs=<N>] [<address|bdx:address|token_id:address> [<payment_id (obsolete)>]]");
+  const char* USAGE_SWEEP_BELOW("sweep_below <amount_threshold> [index=<N1>[,<N2>,...]] [flash|unimportant] [<address|bdx:address|token_id:address> [<payment_id (obsolete)>]]");
+  const char* USAGE_SWEEP_SINGLE("sweep_single [flash|unimportant] [outputs=<N>] <key_image> <address|bdx:address|token_id:address> [<payment_id (obsolete)>]");
+  const char* USAGE_SWEEP_UNMIXABLE("sweep_unmixable [<token_id>]");
+  const char* USAGE_SWEEP_ACCOUNT("sweep_account <account> [index=<N1>[,<N2>,...] | index=all] [<priority>] [<ring_size>] [outputs=<N>] <address|bdx:address|token_id:address> [<payment_id (obsolete)>]");
   const char* USAGE_SIGN_TRANSFER("sign_transfer [export_raw]");
   const char* USAGE_SET_LOG("set_log <level>|{+,-,}<categories>");
   const char* USAGE_ACCOUNT("account\n"
@@ -532,7 +435,7 @@ namespace
   const char* USAGE_PRINT_LOCKED_STAKES("print_locked_stakes [key_images]");
 
   const char* USAGE_BNS_BUY_MAPPING("bns_buy_mapping [index=<N1>[,<N2>,...]] [<priority>] [years=1y|2y|5y|10y] [owner=<value>] [backup_owner=<value>] [bchat_id=<value>] [belnet_id=<value>] [address=<value>] [eth=<value>] <name>");
-  const char* USAGE_REGISTER_GATEWAY_ADDRESS("register_gateway_address [index=<N1>[,<N2>,...]] [<priority>] <gateway_secret_hex> <owner_type: schnorr|eth|eddsa> <owner_key_hex> [meta...]");
+  const char* USAGE_REGISTER_GATEWAY_ADDRESS("register_gateway_address [index=<N1>[,<N2>,...]] [<priority>] <owner_type: schnorr|eth|eddsa> <owner_key_hex> [meta...]");
   const char* USAGE_BNS_RENEW_MAPPING("bns_renew_mapping [index=<N1>[,<N2>,...]] [<priority>] [years=1y|2y|5y|10y] <name>");
   const char* USAGE_BNS_UPDATE_MAPPING("bns_update_mapping [index=<N1>[,<N2>,...]] [<priority>] [owner=<value>] [backup_owner=<value>] [bchat_id=<value>] [belnet_id=<value>] [address=<value>] [eth=<value>] [signature=<hex_signature>] <name>");
 
@@ -543,11 +446,11 @@ namespace
     
   const char* USAGE_COIN_BURN("coin_burn [index=<N1>[,<N2>,...]] [<priority>] <burn=amount | txid>");
 
-  const char* USAGE_DEPLOY_NEW_ASSET("deploy_new_asset [index=<N1>[,<N2>,...]] [<priority>] <json_filename>");
-  const char* USAGE_ASSETS_BY_OWNER("assets_by_owner [<owner_address_or_spend_public_key>]");
-  const char* USAGE_EMIT_ASSET("emit_asset [index=<N1>[,<N2>,...]] [<priority>] <asset_id> <amount>");
-  const char* USAGE_BURN_ASSET("burn_asset [index=<N1>[,<N2>,...]] [<priority>] <asset_id> <amount>");
-  const char* USAGE_UPDATE_ASSET("update_asset [index=<N1>[,<N2>,...]] [<priority>] <asset_id> <descriptor_json_file>");
+  const char* USAGE_REGISTER_PRIVATE_TOKEN("register_private_token [index=<N1>[,<N2>,...]] [<priority>] <json_filename>");
+  const char* USAGE_TOKENS_BY_OWNER("tokens_by_owner [<owner_address_or_spend_public_key>]");
+  const char* USAGE_MINT_TOKEN("mint_token [index=<N1>[,<N2>,...]] [<priority>] <token_id> <amount>");
+  const char* USAGE_BURN_TOKEN("burn_token [index=<N1>[,<N2>,...]] [<priority>] <token_id> <amount>");
+  const char* USAGE_UPDATE_TOKEN("update_token [index=<N1>[,<N2>,...]] [<priority>] <token_id> <descriptor_json_file>");
 
 
 #if defined (BELDEX_ENABLE_INTEGRATION_TEST_HOOKS)
@@ -2389,8 +2292,8 @@ bool simple_wallet::frozen(const std::vector<std::string> &args)
       if (!m_wallet->frozen(i))
         continue;
       const auto& td = m_wallet->get_transfer_details(i);
-      std::string asset_id_hex = td.m_asset_id != crypto::null_aid ? tools::type_to_hex(td.m_asset_id) : "";
-      message_writer() << tr("Frozen: ") << td.m_key_image << " " << format_amount_with_asset_id(*m_wallet, td.amount(), asset_id_hex);
+      std::string token_id_hex = td.m_token_id != crypto::null_tid ? tools::type_to_hex(td.m_token_id) : "";
+      message_writer() << tr("Frozen: ") << td.m_key_image << " " << format_amount_with_token_id(*m_wallet, td.amount(), token_id_hex);
     }
   }
   else
@@ -2948,10 +2851,10 @@ simple_wallet::simple_wallet()
                            tr(USAGE_SWEEP_UNMIXABLE));
   m_cmd_binder.set_handler("sweep_all", [this](const auto& x) { return sweep_all(x); },
                            tr(USAGE_SWEEP_ALL),
-                           tr("Send all unlocked balance to an address.If no address is specified the address of the currently selected account will be used. If the parameter \"index<N1>[,<N2>,...]\" or \"index=all\" is specified, the wallet sweeps outputs received by those address indices. If omitted, the wallet randomly chooses an address index to be used. If the parameter \"outputs=<N>\" is specified and  N > 0, wallet splits the transaction into N even outputs. Use a plain address to sweep native balance and all assets, \"bdx:address\" to sweep only native balance, or \"asset_id:address\" to sweep only a specific asset."));
+                           tr("Send all unlocked balance to an address.If no address is specified the address of the currently selected account will be used. If the parameter \"index<N1>[,<N2>,...]\" or \"index=all\" is specified, the wallet sweeps outputs received by those address indices. If omitted, the wallet randomly chooses an address index to be used. If the parameter \"outputs=<N>\" is specified and  N > 0, wallet splits the transaction into N even outputs. Use a plain address to sweep native balance and all tokens, \"bdx:address\" to sweep only native balance, or \"token_id:address\" to sweep only a specific token."));
   m_cmd_binder.set_handler("sweep_account", [this](const auto& x) { return sweep_account(x); },
                            tr(USAGE_SWEEP_ACCOUNT),
-                           tr("Send all unlocked balance from a given account to an address. If the parameter \"index=<N1>[,<N2>,...]\" or \"index=all\" is specified, the wallet sweeps outputs received by those or all address indices, respectively. If omitted, the wallet randomly chooses an address index to be used. If the parameter \"outputs=<N>\" is specified and  N > 0, wallet splits the transaction into N even outputs. Use a plain address to sweep native balance and all assets from that account, \"bdx:address\" to sweep only native balance, or \"asset_id:address\" to sweep only a specific asset from that account."));
+                           tr("Send all unlocked balance from a given account to an address. If the parameter \"index=<N1>[,<N2>,...]\" or \"index=all\" is specified, the wallet sweeps outputs received by those or all address indices, respectively. If omitted, the wallet randomly chooses an address index to be used. If the parameter \"outputs=<N>\" is specified and  N > 0, wallet splits the transaction into N even outputs. Use a plain address to sweep native balance and all tokens from that account, \"bdx:address\" to sweep only native balance, or \"token_id:address\" to sweep only a specific token from that account."));
   m_cmd_binder.set_handler("sweep_below",
                            [this](const auto& x) { return sweep_below(x); },
                            tr(USAGE_SWEEP_BELOW),
@@ -3424,7 +3327,7 @@ Pending or Failed: "failed"|"pending",  "out", Lock, Checkpointed, Time, Amount*
   m_cmd_binder.set_handler("register_gateway_address",
                            [this](const auto& x) { return register_gateway_address(x); },
                            tr(USAGE_REGISTER_GATEWAY_ADDRESS),
-                           tr("Register a gateway address (HF22). Burns the registration fee and stores the owner key on-chain. The gateway id is derived from <gateway_secret_hex> and the tx is self-signed with it to prove control of the id. Args: <gateway_secret_hex> <owner_type> <owner_key_hex> [meta]."));
+                           tr("Register a gateway address (HF23). Burns the registration fee and stores the owner key on-chain. The gateway id is this wallet's view public key and the tx is self-signed with the wallet's view secret key to prove control of the id. Args: <owner_type> <owner_key_hex> [meta]."));
 
   m_cmd_binder.set_handler("bns_renew_mapping",
                            [this](const auto& x) { return bns_renew_mapping(x); },
@@ -3461,31 +3364,31 @@ Pending or Failed: "failed"|"pending",  "out", Lock, Checkpointed, Time, Amount*
                            tr(USAGE_COIN_BURN),
                            tr(tools::wallet_rpc::COIN_BURN::description));
 
-  // HF21: confidential asset commands
-  m_cmd_binder.set_handler("deploy_new_asset",
-                           [this](const auto& x) { return deploy_new_asset(x); },
-                           tr(USAGE_DEPLOY_NEW_ASSET),
-                           tr("Deploy a new confidential asset. Provide a JSON file with: ticker, full_name, total_max_supply, current_supply, decimal_point, meta_info."));
+  // HF22: private token commands
+  m_cmd_binder.set_handler("register_private_token",
+                           [this](const auto& x) { return register_private_token(x); },
+                           tr(USAGE_REGISTER_PRIVATE_TOKEN),
+                           tr("Register a new private token. Provide a JSON file with: ticker, full_name, total_max_supply, current_supply, decimal_point, meta_info."));
 
-  m_cmd_binder.set_handler("assets_by_owner",
-                           [this](const auto& x) { return assets_by_owner(x); },
-                           tr(USAGE_ASSETS_BY_OWNER),
-                           tr("List all deployed assets belonging to this wallet or the specified owner."));
+  m_cmd_binder.set_handler("tokens_by_owner",
+                           [this](const auto& x) { return tokens_by_owner(x); },
+                           tr(USAGE_TOKENS_BY_OWNER),
+                           tr("List all registered tokens belonging to this wallet or the specified owner."));
 
-  m_cmd_binder.set_handler("emit_asset",
-                           [this](const auto& x) { return emit_asset(x); },
-                           tr(USAGE_EMIT_ASSET),
-                           tr("Emit an deployed asset by sending a transfer with the asset's ID and the amount to emit encoded in the transaction extra. The optional index= and <priority> parameters work as in the `transfer' command."));
+  m_cmd_binder.set_handler("mint_token",
+                           [this](const auto& x) { return mint_token(x); },
+                           tr(USAGE_MINT_TOKEN),
+                           tr("Mint a registered token by sending a transfer with the token's ID and the amount to mint encoded in the transaction extra. The optional index= and <priority> parameters work as in the `transfer' command."));
 
-  m_cmd_binder.set_handler("burn_asset",
-                           [this](const auto& x) { return burn_asset(x); },
-                           tr(USAGE_BURN_ASSET),
-                           tr("Publicly burn supply from an existing confidential asset."));
+  m_cmd_binder.set_handler("burn_token",
+                           [this](const auto& x) { return burn_token(x); },
+                           tr(USAGE_BURN_TOKEN),
+                           tr("Publicly burn supply from an existing private token."));
 
-  m_cmd_binder.set_handler("update_asset",
-                           [this](const auto& x) { return update_asset(x); },
-                           tr(USAGE_UPDATE_ASSET),
-                           tr("Update an deployed asset's meta info. Provide the asset ID and a file containing the new meta info. The optional index= and <priority> parameters work as in the `transfer' command."));
+  m_cmd_binder.set_handler("update_token",
+                           [this](const auto& x) { return update_token(x); },
+                           tr(USAGE_UPDATE_TOKEN),
+                           tr("Update a registered token's meta info. Provide the token ID and a file containing the new meta info. The optional index= and <priority> parameters work as in the `transfer' command."));
 }
 
 simple_wallet::~simple_wallet()
@@ -5199,15 +5102,15 @@ void simple_wallet::on_unconfirmed_money_received(uint64_t height, const crypto:
     m_refresh_progress_reporter.update(height, true,m_wallet->nettype());
 }
 //----------------------------------------------------------------------------------------------------
-void simple_wallet::on_money_spent(uint64_t height, const crypto::hash &txid, const cryptonote::transaction& in_tx, uint64_t amount, const crypto::asset_id& asset_id, const cryptonote::transaction& spend_tx, const cryptonote::subaddress_index& subaddr_index)
+void simple_wallet::on_money_spent(uint64_t height, const crypto::hash &txid, const cryptonote::transaction& in_tx, uint64_t amount, const crypto::token_id& token_id, const cryptonote::transaction& spend_tx, const cryptonote::subaddress_index& subaddr_index)
 {
   if (m_locked)
     return;
-  const std::string asset_id_hex = asset_id == crypto::null_aid ? "" : tools::type_to_hex(asset_id);
+  const std::string token_id_hex = token_id == crypto::null_tid ? "" : tools::type_to_hex(token_id);
   message_writer(epee::console_color_magenta, false) << "\r" <<
     tr("Height ") << height << ", " <<
     tr("txid ") << txid << ", " <<
-    tr("spent ") << format_amount_with_asset_id(*m_wallet, amount, asset_id_hex, true) << ", " <<
+    tr("spent ") << format_amount_with_token_id(*m_wallet, amount, token_id_hex, true) << ", " <<
     tr("idx ") << subaddr_index;
   if (m_auto_refresh_refreshing)
     m_cmd_binder.print_prompt();
@@ -5451,36 +5354,36 @@ bool simple_wallet::show_balance_unlocked(bool detailed)
   success_msg_writer() << tr("Balance: ") << print_money(m_wallet->balance(m_current_subaddress_account, false)) << ", "
     << tr("unlocked balance: ") << print_money(unlocked_balance) << unlock_time_message << extra;
 
-  // HF21: show per-asset balances
+  // HF22: show per-token balances
   {
-    const auto asset_bals = m_wallet->asset_balances(m_current_subaddress_account, false);
-    const auto asset_unlocked_bals = m_wallet->asset_balances(m_current_subaddress_account, true);
-    if (!asset_bals.empty())
+    const auto token_bals = m_wallet->token_balances(m_current_subaddress_account, false);
+    const auto token_unlocked_bals = m_wallet->token_balances(m_current_subaddress_account, true);
+    if (!token_bals.empty())
     {
-      success_msg_writer() << tr("Confidential asset balances:");
-      for (const auto& [asset_id, amount] : asset_bals)
+      success_msg_writer() << tr("Private token balances:");
+      for (const auto& [token_id, amount] : token_bals)
       {
-        const std::string asset_hex = tools::type_to_hex(asset_id);
-        const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-        const std::string formatted_amount = asset_info
-            ? print_asset_amount(amount, asset_info->decimal_point)
+        const std::string token_hex = tools::type_to_hex(token_id);
+        const auto token_info = get_token_display_info(*m_wallet, token_id);
+        const std::string formatted_amount = token_info
+            ? print_token_amount(amount, token_info->decimal_point)
             : std::to_string(amount);
 
         // Fetch unlocked balance
         uint64_t unlocked_amount = 0;
-        auto unlocked_it = asset_unlocked_bals.find(asset_id);
-        if (unlocked_it != asset_unlocked_bals.end())
+        auto unlocked_it = token_unlocked_bals.find(token_id);
+        if (unlocked_it != token_unlocked_bals.end())
           unlocked_amount = unlocked_it->second;
 
-        const std::string formatted_unlocked = asset_info
-            ? print_asset_amount(unlocked_amount, asset_info->decimal_point)
+        const std::string formatted_unlocked = token_info
+            ? print_token_amount(unlocked_amount, token_info->decimal_point)
             : std::to_string(unlocked_amount);
 
-        success_msg_writer() << "  " << asset_hex
-                             << (asset_info && !asset_info->ticker.empty() ? " (" + asset_info->ticker + ")" : "")
+        success_msg_writer() << "  " << token_hex
+                             << (token_info && !token_info->ticker.empty() ? " (" + token_info->ticker + ")" : "")
                              << "  balance: " << formatted_amount
                              << ", unlocked balance: " << formatted_unlocked
-                             << (asset_info ? fmt::format(" [dp={}]", asset_info->decimal_point) : " [atomic units]");
+                             << (token_info ? fmt::format(" [dp={}]", token_info->decimal_point) : " [atomic units]");
       }
     }
   }
@@ -5488,12 +5391,12 @@ bool simple_wallet::show_balance_unlocked(bool detailed)
   std::map<uint32_t, uint64_t> balance_per_subaddress = m_wallet->balance_per_subaddress(m_current_subaddress_account, false);
   std::map<uint32_t, std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> unlocked_balance_per_subaddress = m_wallet->unlocked_balance_per_subaddress(m_current_subaddress_account, false);
 
-  std::map<uint32_t, std::unordered_map<crypto::asset_id, uint64_t>> asset_balances_per_subaddress = m_wallet->asset_balances_per_subaddress(m_current_subaddress_account, false);
-  std::map<uint32_t, std::unordered_map<crypto::asset_id, uint64_t>> unlocked_asset_balances_per_subaddress = m_wallet->unlocked_asset_balances_per_subaddress(m_current_subaddress_account, false);
+  std::map<uint32_t, std::unordered_map<crypto::token_id, uint64_t>> token_balances_per_subaddress = m_wallet->token_balances_per_subaddress(m_current_subaddress_account, false);
+  std::map<uint32_t, std::unordered_map<crypto::token_id, uint64_t>> unlocked_token_balances_per_subaddress = m_wallet->unlocked_token_balances_per_subaddress(m_current_subaddress_account, false);
 
   std::set<uint32_t> all_subaddr_indices;
   for (const auto& i : balance_per_subaddress) all_subaddr_indices.insert(i.first);
-  for (const auto& i : asset_balances_per_subaddress) all_subaddr_indices.insert(i.first);
+  for (const auto& i : token_balances_per_subaddress) all_subaddr_indices.insert(i.first);
 
   if (m_current_subaddress_account == 0) { // Only the primary account can stake and earn rewards, currently
     if (auto stakes = m_wallet->get_staked_master_nodes(); !stakes.empty()) {
@@ -5520,38 +5423,38 @@ bool simple_wallet::show_balance_unlocked(bool detailed)
   {
     cryptonote::subaddress_index subaddr_index = {m_current_subaddress_account, minor_idx};
     std::string address_str = m_wallet->get_subaddress_as_str(subaddr_index).substr(0, 6);
-    uint64_t num_unspent_outputs = std::count_if(transfers.begin(), transfers.end(), [&subaddr_index](const wallet::transfer_details& td) { return !td.m_spent && td.m_subaddr_index == subaddr_index && td.m_asset_id == crypto::null_aid; });
+    uint64_t num_unspent_outputs = std::count_if(transfers.begin(), transfers.end(), [&subaddr_index](const wallet::transfer_details& td) { return !td.m_spent && td.m_subaddr_index == subaddr_index && td.m_token_id == crypto::null_tid; });
     uint64_t bal = balance_per_subaddress.count(minor_idx) ? balance_per_subaddress[minor_idx] : 0;
     uint64_t unlocked_bal = unlocked_balance_per_subaddress.count(minor_idx) ? unlocked_balance_per_subaddress[minor_idx].first : 0;
     
     success_msg_writer() << fmt::format("{:>8d} {:>6s} {:>21s} {:>21s} {:>7d} {:>21s}", minor_idx, address_str, print_money(bal), print_money(unlocked_bal), num_unspent_outputs, m_wallet->get_subaddress_label(subaddr_index));
 
-    // Print asset balances for this subaddress
-    if (asset_balances_per_subaddress.count(minor_idx)) {
-      size_t num_assets = asset_balances_per_subaddress.at(minor_idx).size();
+    // Print token balances for this subaddress
+    if (token_balances_per_subaddress.count(minor_idx)) {
+      size_t num_tokens = token_balances_per_subaddress.at(minor_idx).size();
       size_t count = 0;
-      for (const auto& [asset_id, amount] : asset_balances_per_subaddress.at(minor_idx)) {
+      for (const auto& [token_id, amount] : token_balances_per_subaddress.at(minor_idx)) {
         ++count;
         uint64_t unlocked_amount = 0;
-        if (unlocked_asset_balances_per_subaddress.count(minor_idx) && unlocked_asset_balances_per_subaddress.at(minor_idx).count(asset_id))
-          unlocked_amount = unlocked_asset_balances_per_subaddress.at(minor_idx).at(asset_id);
+        if (unlocked_token_balances_per_subaddress.count(minor_idx) && unlocked_token_balances_per_subaddress.at(minor_idx).count(token_id))
+          unlocked_amount = unlocked_token_balances_per_subaddress.at(minor_idx).at(token_id);
           
-        uint64_t num_asset_outputs = std::count_if(transfers.begin(), transfers.end(), [&subaddr_index, &asset_id](const wallet::transfer_details& td) { return !td.m_spent && td.m_subaddr_index == subaddr_index && td.m_asset_id == asset_id; });
+        uint64_t num_token_outputs = std::count_if(transfers.begin(), transfers.end(), [&subaddr_index, &token_id](const wallet::transfer_details& td) { return !td.m_spent && td.m_subaddr_index == subaddr_index && td.m_token_id == token_id; });
 
-        const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-        const std::string formatted_amount = asset_info ? print_asset_amount(amount, asset_info->decimal_point, false) : std::to_string(amount);
-        const std::string formatted_unlocked = asset_info ? print_asset_amount(unlocked_amount, asset_info->decimal_point, false) : std::to_string(unlocked_amount);
+        const auto token_info = get_token_display_info(*m_wallet, token_id);
+        const std::string formatted_amount = token_info ? print_token_amount(amount, token_info->decimal_point, false) : std::to_string(amount);
+        const std::string formatted_unlocked = token_info ? print_token_amount(unlocked_amount, token_info->decimal_point, false) : std::to_string(unlocked_amount);
         
-        std::string asset_label = tools::type_to_hex(asset_id).substr(0, 6);
-        if (asset_info && !asset_info->ticker.empty())
-            asset_label = asset_info->ticker;
+        std::string token_label = tools::type_to_hex(token_id).substr(0, 6);
+        if (token_info && !token_info->ticker.empty())
+            token_label = token_info->ticker;
 
         success_msg_writer() << fmt::format("      {} {:<6s} {:>21s} {:>21s} {:>7d}", 
-            count == num_assets ? "\x1B[90m\xE2\x94\x94\xE2\x94\x80\x1B[0m" : "\x1B[90m\xE2\x94\x9C\xE2\x94\x80\x1B[0m",
-            asset_label,
+            count == num_tokens ? "\x1B[90m\xE2\x94\x94\xE2\x94\x80\x1B[0m" : "\x1B[90m\xE2\x94\x9C\xE2\x94\x80\x1B[0m",
+            token_label,
             formatted_amount,
             formatted_unlocked,
-            num_asset_outputs);
+            num_token_outputs);
       }
     }
   }
@@ -5650,7 +5553,7 @@ bool simple_wallet::show_incoming_transfers(const std::vector<std::string>& args
         std::string verbose_string;
         if (verbose)
           verbose_string = fmt::format("{:16s}{:22s}", tr("pubkey"), tr("key image"));
-        message_writer() << fmt::format("{:>21s}{:>8s}{:>12s}{:>8s}{:>16s}{:>34s}{:>46s}    {}", tr("amount"), tr("spent"), tr("unlocked"), tr("ringct"), tr("global_index"), tr("tx_id"), tr("addr_index"), verbose_string);
+        message_writer() << fmt::format("{:>21s}{:>8s}{:>12s}{:>16s}{:>8s}{:>16s}{:>34s}{:>46s}    {}", tr("amount"), tr("spent"), tr("unlocked"), tr("unlock_time"), tr("ringct"), tr("global_index"), tr("tx_id"), tr("addr_index"), verbose_string);
       }
       std::string extra_string;
       if (verbose)
@@ -5668,11 +5571,13 @@ bool simple_wallet::show_incoming_transfers(const std::vector<std::string>& args
         const std::pair<std::string, std::string> line = show_outputs_line(heights, blockchain_height, idx);
         extra_string += std::string("\n    ") + tr("Used at heights: ") + line.first + "\n    " + line.second;
       }
-      message_writer(td.m_spent ? epee::console_color_magenta : epee::console_color_green, false) << boost::format("%21s%8s%12s%8s%16u%68s%8u%s") %
-                                                                                                         format_received_amount(*m_wallet, td.m_txid, td.m_subaddr_index, td.amount(), td.m_tx.unlock_time) %
+      const uint64_t output_unlock_time = td.m_tx.get_unlock_time(td.m_internal_output_index);
+      message_writer(td.m_spent ? epee::console_color_magenta : epee::console_color_green, false) << boost::format("%21s%8s%12s%16u%8s%16u%68s%8u%s") %
+                                                                                                         format_received_amount(*m_wallet, td.m_txid, td.m_subaddr_index, td.amount(), output_unlock_time) %
                                                                                                          (td.m_spent ? tr("T") : tr("F")) %
                                                                                                          (m_wallet->frozen(td) ? tr("[frozen]") : m_wallet->is_transfer_unlocked(td) ? tr("unlocked")
                                                                                                                                                                                      : tr("locked")) %
+                                                                                                         output_unlock_time %
                                                                                                          (td.is_rct() ? tr("RingCT") : tr("-")) %
                                                                                                          td.m_global_output_index %
                                                                                                          td.m_txid %
@@ -6126,16 +6031,16 @@ bool simple_wallet::confirm_and_send_tx(std::vector<cryptonote::address_parse_in
       uint64_t dust_not_in_fee = 0;
       uint64_t dust_in_fee = 0;
       uint64_t change = 0;
-      std::unordered_map<crypto::asset_id, uint64_t> asset_sent;
+      std::unordered_map<crypto::token_id, uint64_t> token_sent;
       for (size_t n = 0; n < ptx_vector.size(); ++n)
       {
         total_fee += ptx_vector[n].fee;
         for (const auto& dest : ptx_vector[n].dests)
         {
-          if (dest.asset_id == crypto::null_aid)
+          if (dest.token_id == crypto::null_tid)
             total_sent += dest.amount;
           else
-            asset_sent[dest.asset_id] += dest.amount;
+            token_sent[dest.token_id] += dest.amount;
         }
         change += ptx_vector[n].change_dts.amount;
 
@@ -6158,9 +6063,9 @@ bool simple_wallet::confirm_and_send_tx(std::vector<cryptonote::address_parse_in
         if (subaddr_indices.size() > 1)
           prompt << tr("WARNING: Outputs of multiple addresses are being used together, which might potentially compromise your confidentiality.\n");
       }
-      for (const auto& [aid, amount] : asset_sent)
-        prompt << boost::format(tr("Sending %s  ")) % format_amount_with_asset_id(*m_wallet, amount, tools::type_to_hex(aid));
-      if (total_sent > 0 || asset_sent.empty())
+      for (const auto& [tid, amount] : token_sent)
+        prompt << boost::format(tr("Sending %s  ")) % format_amount_with_token_id(*m_wallet, amount, tools::type_to_hex(tid));
+      if (total_sent > 0 || token_sent.empty())
         prompt << boost::format(tr("Sending %s  ")) % print_money(total_sent);
       if (ptx_vector.size() > 1)
       {
@@ -6283,7 +6188,7 @@ bool simple_wallet::confirm_and_send_tx(std::vector<cryptonote::address_parse_in
   return true;
 }
 
-//  "transfer [index=<N1>[,<N2>,...]] [<priority>] <assetid:address> <amount> [<payment_id>]"
+//  "transfer [index=<N1>[,<N2>,...]] [<priority>] <tokenid:address> <amount> [<payment_id>]"
 bool simple_wallet::transfer_main(Transfer transfer_type, const std::vector<std::string> &args_, bool called_by_mms)
 {
   if (!try_connect_to_daemon())
@@ -6384,7 +6289,7 @@ bool simple_wallet::transfer_main(Transfer transfer_type, const std::vector<std:
     LOG_PRINT_L0("has_uri" << has_uri);
     if (i + 1 < local_args.size())
     {
-      // Gateway deposit (HF22): a gwB…/gwiB… destination is paid out as a
+      // Gateway deposit (HF23): a gwB…/gwiB… destination is paid out as a
       // transparent tx_out_gateway. The (optional) integrated payment id is
       // encrypted into the output; no tx-wide payment id is used.
       cryptonote::gateway_address_parse_info gw_info{};
@@ -6406,10 +6311,10 @@ bool simple_wallet::transfer_main(Transfer transfer_type, const std::vector<std:
       }
 
       std::string parsed_address {};
-      crypto::asset_id parsed_asset_id = crypto::null_aid;
-      if (!parse_asset_prefixed_address_arg(local_args[i], parsed_asset_id, parsed_address))
+      crypto::token_id parsed_token_id = crypto::null_tid;
+      if (!parse_token_prefixed_address_arg(local_args[i], parsed_token_id, parsed_address))
       {
-        fail_msg_writer() << tr("Failed to parse destination asset id in: ") << local_args[i];
+        fail_msg_writer() << tr("Failed to parse destination token id in: ") << local_args[i];
         return false;
       }
 
@@ -6427,10 +6332,10 @@ bool simple_wallet::transfer_main(Transfer transfer_type, const std::vector<std:
       }
 
       bool ok = false;
-      if (parsed_asset_id != crypto::null_aid)
+      if (parsed_token_id != crypto::null_tid)
       {
-        if (const auto asset_info = get_asset_display_info(*m_wallet, parsed_asset_id))
-          ok = parse_asset_amount(de.amount, local_args[i + 1], asset_info->decimal_point);
+        if (const auto token_info = get_token_display_info(*m_wallet, parsed_token_id))
+          ok = parse_token_amount(de.amount, local_args[i + 1], token_info->decimal_point);
         else
           ok = cryptonote::parse_amount(de.amount, local_args[i + 1]);
       }
@@ -6442,7 +6347,7 @@ bool simple_wallet::transfer_main(Transfer transfer_type, const std::vector<std:
           ", " << tr("expected number from 0 to ") << print_money(std::numeric_limits<uint64_t>::max());
         return false;
       }
-      de.asset_id = parsed_asset_id;
+      de.token_id = parsed_token_id;
       de.original = local_args[i];
       i += 2;
     }
@@ -7278,46 +7183,35 @@ bool simple_wallet::register_gateway_address(std::vector<std::string> args)
   std::set<uint32_t> subaddr_indices = {};
   if (!parse_subaddr_indices_and_priority(*m_wallet, args, subaddr_indices, priority, m_current_subaddress_account)) return false;
 
-  if (args.size() < 3)
+  if (args.size() < 2)
   {
     PRINT_USAGE(USAGE_REGISTER_GATEWAY_ADDRESS);
     return true;
   }
 
-  // The gateway id is derived from its secret key; the registration is
-  // self-signed with that secret to prove control of the id (F2).
-  crypto::secret_key gateway_skey;
-  if (!tools::hex_to_type(args[0], gateway_skey))
-  {
-    fail_msg_writer() << tr("Invalid gateway secret key (expected 64-char hex)");
-    return true;
-  }
-  crypto::public_key gateway_id;
-  if (!crypto::secret_key_to_public_key(gateway_skey, gateway_id))
-  {
-    fail_msg_writer() << tr("Invalid gateway secret key: does not yield a valid public key");
-    return true;
-  }
+  // The gateway id is this wallet's view public key (sourced inside
+  // create_gateway_register_tx); it is not taken from the user.
+  const crypto::public_key gateway_id = m_wallet->get_account().get_keys().m_account_address.m_view_public_key;
 
   // Owner key: one of the three supported types.
-  const std::string& owner_type = args[1];
+  const std::string& owner_type = args[0];
   cryptonote::gateway_owner_key_v owner_key;
   if (owner_type == "schnorr" || owner_type == "ed25519")
   {
     crypto::public_key pk;
-    if (!tools::hex_to_type(args[2], pk)) { fail_msg_writer() << tr("Invalid schnorr owner key (expected 64-char hex)"); return true; }
+    if (!tools::hex_to_type(args[1], pk)) { fail_msg_writer() << tr("Invalid schnorr owner key (expected 64-char hex)"); return true; }
     owner_key = pk;
   }
   else if (owner_type == "eth")
   {
     crypto::eth_public_key pk;
-    if (!tools::hex_to_type(args[2], pk)) { fail_msg_writer() << tr("Invalid eth owner key (expected 66-char hex / 33-byte compressed secp256k1)"); return true; }
+    if (!tools::hex_to_type(args[1], pk)) { fail_msg_writer() << tr("Invalid eth owner key (expected 66-char hex / 33-byte compressed secp256k1)"); return true; }
     owner_key = pk;
   }
   else if (owner_type == "eddsa")
   {
     crypto::eddsa_public_key pk;
-    if (!tools::hex_to_type(args[2], pk)) { fail_msg_writer() << tr("Invalid eddsa owner key (expected 64-char hex)"); return true; }
+    if (!tools::hex_to_type(args[1], pk)) { fail_msg_writer() << tr("Invalid eddsa owner key (expected 64-char hex)"); return true; }
     owner_key = pk;
   }
   else
@@ -7325,7 +7219,7 @@ bool simple_wallet::register_gateway_address(std::vector<std::string> args)
     fail_msg_writer() << tr("owner_type must be one of: schnorr, eth, eddsa");
     return true;
   }
-  std::string meta = args.size() > 3 ? tools::join(" ", args.begin() + 3, args.end()) : std::string{};
+  std::string meta = args.size() > 2 ? tools::join(" ", args.begin() + 2, args.end()) : std::string{};
   if (meta.size() >= 2 && meta.front() == '"' && meta.back() == '"')
     meta = meta.substr(1, meta.size() - 2);
 
@@ -7334,7 +7228,7 @@ bool simple_wallet::register_gateway_address(std::vector<std::string> args)
   std::vector<tools::wallet2::pending_tx> ptx_vector;
   try
   {
-    ptx_vector = m_wallet->create_gateway_register_tx(gateway_skey, owner_key, meta, &reason, priority, m_current_subaddress_account, subaddr_indices);
+    ptx_vector = m_wallet->create_gateway_register_tx(owner_key, meta, &reason, priority, m_current_subaddress_account, subaddr_indices);
     if (ptx_vector.empty())
     {
       fail_msg_writer() << reason;
@@ -7353,7 +7247,7 @@ bool simple_wallet::register_gateway_address(std::vector<std::string> args)
     fmt::print(fmt::format(tr("Gateway addr: {}\n"), gateway_address));
     fmt::print(fmt::format(tr("Gateway id  : {}\n"), tools::type_to_hex(gateway_id)));
     fmt::print(fmt::format(tr("Owner type  : {}\n"), owner_type));
-    fmt::print(fmt::format(tr("Owner key   : {}\n"), args[2]));
+    fmt::print(fmt::format(tr("Owner key   : {}\n"), args[1]));
     fmt::print(fmt::format(tr("Meta        : {}\n"), meta.empty() ? "(none)" : meta));
     fmt::print(fmt::format(tr("Fee burned  : {}\n"), print_money(cryptonote::GATEWAY_ADDRESS_REGISTRATION_FEE)));
     if (!confirm_and_send_tx(dsts, ptx_vector, priority == tools::tx_priority_flash))
@@ -8096,23 +7990,23 @@ bool simple_wallet::coin_burn(std::vector<std::string> args)
   return true;
 }
 //----------------------------------------------------------------------------------------------------
-bool simple_wallet::get_asset_info(const std::string& asset_id_hex, nlohmann::json& info_res)
+bool simple_wallet::get_token_info(const std::string& token_id_hex, nlohmann::json& info_res)
 {
   try {
     nlohmann::json info_req = nlohmann::json::object();
-    info_req["asset_id"] = asset_id_hex;
-    info_res = m_wallet->json_rpc("get_asset_info", info_req);
+    info_req["token_id"] = token_id_hex;
+    info_res = m_wallet->json_rpc("get_token_info", info_req);
     return true;
   } catch (const std::exception&) {
     return false;
   }
 }
 //----------------------------------------------------------------------------------------------------
-bool simple_wallet::assets_by_owner(const std::vector<std::string>& args_)
+bool simple_wallet::tokens_by_owner(const std::vector<std::string>& args_)
 {
   if (args_.size() > 1)
   {
-    PRINT_USAGE(USAGE_ASSETS_BY_OWNER);
+    PRINT_USAGE(USAGE_TOKENS_BY_OWNER);
     return true;
   }
 
@@ -8121,9 +8015,9 @@ bool simple_wallet::assets_by_owner(const std::vector<std::string>& args_)
     nlohmann::json list_req = nlohmann::json::object();
     list_req["offset"] = 0;
     list_req["count"] = 1000000;
-    list_res = m_wallet->json_rpc("get_asset_list", list_req);
+    list_res = m_wallet->json_rpc("get_token_list", list_req);
   } catch (const std::exception& e) {
-    fail_msg_writer() << "Failed to fetch asset list from daemon: " << e.what();
+    fail_msg_writer() << "Failed to fetch token list from daemon: " << e.what();
     return true;
   }
 
@@ -8144,19 +8038,19 @@ bool simple_wallet::assets_by_owner(const std::vector<std::string>& args_)
     }
   }
 
-  if (list_res.contains("asset_ids")) {
-    for (const auto& asset_id_val : list_res["asset_ids"]) {
-      std::string asset_id_hex = asset_id_val.get<std::string>();
+  if (list_res.contains("token_ids")) {
+    for (const auto& token_id_val : list_res["token_ids"]) {
+      std::string token_id_hex = token_id_val.get<std::string>();
       
       nlohmann::json info_res;
-      if (!get_asset_info(asset_id_hex, info_res)) {
-        fail_msg_writer() << tr("Failed to fetch asset info from daemon for asset: ") << asset_id_hex;
+      if (!get_token_info(token_id_hex, info_res)) {
+        fail_msg_writer() << tr("Failed to fetch token info from daemon for token: ") << token_id_hex;
         continue;
       }
 
       if (info_res.contains("owner") && info_res["owner"].get<std::string>() == requested_owner) {
         nlohmann::json out = {
-          {"Asset ID", info_res.value("asset_id", "")},
+          {"Token ID", info_res.value("token_id", "")},
           {"ticker", info_res.value("ticker", "")},
           {"full_name", info_res.value("full_name", "")},
           {"total_max_supply", info_res.value("total_max_supply", (uint64_t)0)},
@@ -8172,7 +8066,7 @@ bool simple_wallet::assets_by_owner(const std::vector<std::string>& args_)
   return true;
 }
 //----------------------------------------------------------------------------------------------------
-bool simple_wallet::deploy_new_asset(const std::vector<std::string>& args_)
+bool simple_wallet::register_private_token(const std::vector<std::string>& args_)
 {
   if (!try_connect_to_daemon())
     return false;
@@ -8185,7 +8079,7 @@ bool simple_wallet::deploy_new_asset(const std::vector<std::string>& args_)
 
   if (args.size() != 1)
   {
-    PRINT_USAGE(USAGE_DEPLOY_NEW_ASSET);
+    PRINT_USAGE(USAGE_REGISTER_PRIVATE_TOKEN);
     return false;
   }
 
@@ -8193,9 +8087,9 @@ bool simple_wallet::deploy_new_asset(const std::vector<std::string>& args_)
 
   try
   {
-    cryptonote::asset_descriptor_base descriptor{};
+    cryptonote::token_descriptor_base descriptor{};
     std::string error;
-    if (!load_asset_descriptor_from_json_file(fs::u8path(args[0]), descriptor, error))
+    if (!cryptonote::load_token_descriptor_from_json_file(fs::u8path(args[0]), descriptor, error))
     {
       fail_msg_writer() << error << ": " << args[0];
       return false;
@@ -8206,34 +8100,34 @@ bool simple_wallet::deploy_new_asset(const std::vector<std::string>& args_)
       descriptor.owner = m_wallet->get_account().get_keys().m_account_address.m_spend_public_key;
     else if (descriptor.owner != m_wallet->get_account().get_keys().m_account_address.m_spend_public_key)
     {
-      fail_msg_writer() << tr("Asset owner must be this wallet's spend key");
+      fail_msg_writer() << tr("Token owner must be this wallet's spend key");
       return false;
     }
 
-    // Build asset descriptor operation for tx.extra
-    cryptonote::tx_extra_asset_descriptor_operation ado{};
-    ado.operation_type = cryptonote::asset_descriptor_operation_type::register_asset;
-    ado.fields         = static_cast<uint8_t>(cryptonote::asset_field_descriptor |
-                                               cryptonote::asset_field_asset_id_salt);
-    ado.descriptor     = descriptor;
-    ado.asset_id_salt  = crypto::rand<uint32_t>();
+    // Build token descriptor operation for tx.extra
+    cryptonote::tx_extra_token_descriptor_operation tdo{};
+    tdo.operation_type = cryptonote::token_descriptor_operation_type::register_token;
+    tdo.fields         = static_cast<uint8_t>(cryptonote::token_field_descriptor |
+                                               cryptonote::token_field_token_id_salt);
+    tdo.descriptor     = descriptor;
+    tdo.token_id_salt  = crypto::rand<uint32_t>();
 
     std::vector<uint8_t> extra;
-    if (!cryptonote::add_asset_descriptor_operation_to_tx_extra(extra, ado))
+    if (!cryptonote::add_token_descriptor_operation_to_tx_extra(extra, tdo))
     {
-      fail_msg_writer() << tr("Failed to encode asset descriptor into tx extra");
+      fail_msg_writer() << tr("Failed to encode token descriptor into tx extra");
       return false;
     }
 
-    const crypto::asset_id asset_id = cryptonote::get_or_calculate_asset_id(ado);
+    const crypto::token_id token_id = cryptonote::get_or_calculate_token_id(tdo);
 
-    success_msg_writer(true) << tr("New asset deployment details:\n")
-                              << tr("  Asset ID: ") << tools::type_to_hex(asset_id) << "\n"
+    success_msg_writer(true) << tr("New token registration details:\n")
+                              << tr("  Token ID: ") << tools::type_to_hex(token_id) << "\n"
                               << tr("  Ticker:   ") << descriptor.ticker << "\n"
                               << tr("  Full name: ") << descriptor.full_name << "\n"
                               << tr("  Decimal Points: ") << (int)descriptor.decimal_point << "\n"
-                              << tr("  Initial supply: ") << print_asset_amount(descriptor.current_supply, descriptor.decimal_point) << "\n"
-                              << tr("  Max supply: ") << print_asset_amount(descriptor.total_max_supply, descriptor.decimal_point);
+                              << tr("  Initial supply: ") << print_token_amount(descriptor.current_supply, descriptor.decimal_point) << "\n"
+                              << tr("  Max supply: ") << print_token_amount(descriptor.total_max_supply, descriptor.decimal_point);
 
     // Create destination with initial supply - will be minted immediately to wallet
     std::vector<cryptonote::tx_destination_entry> dsts;
@@ -8242,14 +8136,14 @@ bool simple_wallet::deploy_new_asset(const std::vector<std::string>& args_)
       cryptonote::tx_destination_entry dest;
       dest.addr = m_wallet->get_subaddress({m_current_subaddress_account, 0});
       dest.amount = descriptor.current_supply;
-      dest.asset_id = asset_id;
+      dest.token_id = token_id;
       dest.is_subaddress = (m_current_subaddress_account != 0);
       dsts.push_back(dest);
     }
 
-    // Use create_asset_deploy_tx which auto-pads to MIN_ASSET_EMISSION_OUTPUTS
-    auto ptx_vector = m_wallet->create_asset_deploy_tx(
-        dsts, asset_id, cryptonote::TX_OUTPUT_DECOYS, priority, extra,
+    // Use create_private_token_registration_tx which auto-pads to MIN_TOKEN_MINT_OUTPUTS
+    auto ptx_vector = m_wallet->create_private_token_registration_tx(
+        dsts, token_id, cryptonote::TX_OUTPUT_DECOYS, priority, extra,
         m_current_subaddress_account, subaddr_indices);
 
     if (ptx_vector.empty())
@@ -8281,7 +8175,7 @@ bool simple_wallet::deploy_new_asset(const std::vector<std::string>& args_)
   return true;
 }
 //----------------------------------------------------------------------------------------------------
-bool simple_wallet::emit_asset(const std::vector<std::string>& args_)
+bool simple_wallet::mint_token(const std::vector<std::string>& args_)
 {
   if (!try_connect_to_daemon())
     return false;
@@ -8294,31 +8188,31 @@ bool simple_wallet::emit_asset(const std::vector<std::string>& args_)
 
   if (args.size() != 2)
   {
-    PRINT_USAGE(USAGE_EMIT_ASSET);
+    PRINT_USAGE(USAGE_MINT_TOKEN);
     return false;
   }
 
-  crypto::asset_id asset_id;
-  if (!tools::hex_to_type(args[0], asset_id))
+  crypto::token_id token_id;
+  if (!tools::hex_to_type(args[0], token_id))
   {
-    fail_msg_writer() << tr("Failed to parse asset_id");
+    fail_msg_writer() << tr("Failed to parse token_id");
     return false;
   }
 
   nlohmann::json info_res;
-  if (!get_asset_info(args[0], info_res)) {
-    fail_msg_writer() << tr("Failed to fetch asset info from daemon.");
+  if (!get_token_info(args[0], info_res)) {
+    fail_msg_writer() << tr("Failed to fetch token info from daemon.");
     return false;
   }
 
   std::string requested_owner = tools::type_to_hex(m_wallet->get_account().get_keys().m_account_address.m_spend_public_key);
   if (!info_res.contains("owner") || info_res["owner"].get<std::string>() != requested_owner) {
-    fail_msg_writer() << tr("This wallet does not own the asset: ") << args[0];
+    fail_msg_writer() << tr("This wallet does not own the token: ") << args[0];
     return false;
   }
 
   // Parse the human-entered amount as a DISPLAY amount and scale it by the
-  // asset's decimal_point (same convention as `transfer`), e.g. for dp=12
+  // token's decimal_point (same convention as `transfer`), e.g. for dp=12
   // "100" means 100 whole tokens == 100 * 10^12 atomic units. Previously this
   // used get_xtype_from_string, which treated "100" as 100 atomic units and
   // silently minted a millionth-of-a-millionth of the intended amount.
@@ -8327,7 +8221,7 @@ bool simple_wallet::emit_asset(const std::vector<std::string>& args_)
     decimal_point = static_cast<uint8_t>(info_res["decimal_point"].get<unsigned>());
 
   uint64_t amount;
-  if (!parse_asset_amount(amount, args[1], decimal_point))
+  if (!parse_token_amount(amount, args[1], decimal_point))
   {
     fail_msg_writer() << tr("Invalid amount: ") << args[1];
     return false;
@@ -8346,25 +8240,25 @@ bool simple_wallet::emit_asset(const std::vector<std::string>& args_)
     dst.amount = amount;
     dst.addr = dest_info.address;
     dst.is_subaddress = dest_info.is_subaddress;
-    dst.asset_id = asset_id;
+    dst.token_id = token_id;
     dsts.push_back(dst);
 
-    // Create the ADO for emission
-    cryptonote::tx_extra_asset_descriptor_operation ado{};
-    ado.operation_type = cryptonote::asset_descriptor_operation_type::emit_asset;
-    ado.fields         = static_cast<uint8_t>(cryptonote::asset_field_asset_id | cryptonote::asset_field_amount);
-    ado.asset_id       = asset_id;
-    ado.amount         = amount;
+    // Create the TDO for emission
+    cryptonote::tx_extra_token_descriptor_operation tdo{};
+    tdo.operation_type = cryptonote::token_descriptor_operation_type::mint_token;
+    tdo.fields         = static_cast<uint8_t>(cryptonote::token_field_token_id | cryptonote::token_field_amount);
+    tdo.token_id       = token_id;
+    tdo.amount         = amount;
 
     std::vector<uint8_t> extra;
-    if (!cryptonote::add_asset_descriptor_operation_to_tx_extra(extra, ado))
+    if (!cryptonote::add_token_descriptor_operation_to_tx_extra(extra, tdo))
     {
-      fail_msg_writer() << tr("Failed to encode asset descriptor into tx extra");
+      fail_msg_writer() << tr("Failed to encode token descriptor into tx extra");
       return false;
     }
 
-    auto ptx_vector = m_wallet->create_asset_emit_tx(
-        dsts, asset_id, cryptonote::TX_OUTPUT_DECOYS, priority, extra,
+    auto ptx_vector = m_wallet->create_token_mint_tx(
+        dsts, token_id, cryptonote::TX_OUTPUT_DECOYS, priority, extra,
         m_current_subaddress_account, subaddr_indices);
 
     if (ptx_vector.empty())
@@ -8377,9 +8271,9 @@ bool simple_wallet::emit_asset(const std::vector<std::string>& args_)
       return false;
 
     success_msg_writer(true)
-        << "Asset emission submitted\n"
-        << "  Asset ID: " << tools::type_to_hex(asset_id) << "\n"
-        << "  Amount:   " << print_asset_amount(amount, decimal_point) << " (" << amount << " atomic units)\n"
+        << "Token emission submitted\n"
+        << "  Token ID: " << tools::type_to_hex(token_id) << "\n"
+        << "  Amount:   " << print_token_amount(amount, decimal_point) << " (" << amount << " atomic units)\n"
         << "  To:       " << m_wallet->get_subaddress_as_str({m_current_subaddress_account, 0});
   }
   catch (const std::exception& e)
@@ -8396,7 +8290,7 @@ bool simple_wallet::emit_asset(const std::vector<std::string>& args_)
 
   return true;
 }
-bool simple_wallet::burn_asset(const std::vector<std::string>& args_)
+bool simple_wallet::burn_token(const std::vector<std::string>& args_)
 {
   if (!try_connect_to_daemon())
     return false;
@@ -8409,53 +8303,53 @@ bool simple_wallet::burn_asset(const std::vector<std::string>& args_)
 
   if (args.size() != 2)
   {
-    PRINT_USAGE(USAGE_BURN_ASSET);
+    PRINT_USAGE(USAGE_BURN_TOKEN);
     return false;
   }
 
-  struct burn_asset_cli_request
+  struct burn_token_cli_request
   {
-    crypto::asset_id asset_id;
+    crypto::token_id token_id;
     uint64_t amount;
     std::string formatted_amount;
     std::string ticker;
   };
-  std::vector<burn_asset_cli_request> burn_requests;
+  std::vector<burn_token_cli_request> burn_requests;
   burn_requests.reserve(args.size() / 2);
-  std::set<std::string> seen_asset_ids;
+  std::set<std::string> seen_token_ids;
 
   for (size_t i = 0; i < args.size(); i += 2)
   {
-    crypto::asset_id asset_id{};
-    if (!tools::hex_to_type(args[i], asset_id) || asset_id == crypto::null_aid)
+    crypto::token_id token_id{};
+    if (!tools::hex_to_type(args[i], token_id) || token_id == crypto::null_tid)
     {
-      fail_msg_writer() << tr("Invalid asset id");
+      fail_msg_writer() << tr("Invalid token id");
       return false;
     }
-    const std::string asset_id_key(reinterpret_cast<const char*>(&asset_id), sizeof(asset_id));
-    if (!seen_asset_ids.insert(asset_id_key).second)
+    const std::string token_id_key(reinterpret_cast<const char*>(&token_id), sizeof(token_id));
+    if (!seen_token_ids.insert(token_id_key).second)
     {
-      fail_msg_writer() << tr("Duplicate asset id");
+      fail_msg_writer() << tr("Duplicate token id");
       return false;
     }
 
     uint64_t amount_to_burn = 0;
     std::string formatted_amount;
     std::string ticker;
-    const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-    if (asset_info)
+    const auto token_info = get_token_display_info(*m_wallet, token_id);
+    if (token_info)
     {
-      if (!parse_asset_amount(amount_to_burn, args[i + 1], asset_info->decimal_point) || amount_to_burn == 0)
+      if (!parse_token_amount(amount_to_burn, args[i + 1], token_info->decimal_point) || amount_to_burn == 0)
       {
-        fail_msg_writer() << tr("Invalid asset burn amount");
+        fail_msg_writer() << tr("Invalid token burn amount");
         return false;
       }
-      formatted_amount = print_asset_amount(amount_to_burn, asset_info->decimal_point);
-      ticker = asset_info->ticker;
+      formatted_amount = print_token_amount(amount_to_burn, token_info->decimal_point);
+      ticker = token_info->ticker;
     }
     else if (!epee::string_tools::get_xtype_from_string(amount_to_burn, args[i + 1]) || amount_to_burn == 0)
     {
-      fail_msg_writer() << tr("Invalid asset burn amount");
+      fail_msg_writer() << tr("Invalid token burn amount");
       return false;
     }
     else
@@ -8463,36 +8357,36 @@ bool simple_wallet::burn_asset(const std::vector<std::string>& args_)
       formatted_amount = std::to_string(amount_to_burn);
     }
 
-    burn_requests.push_back({asset_id, amount_to_burn, std::move(formatted_amount), std::move(ticker)});
+    burn_requests.push_back({token_id, amount_to_burn, std::move(formatted_amount), std::move(ticker)});
   }
 
   SCOPED_WALLET_UNLOCK();
 
   try
   {
-    THROW_WALLET_EXCEPTION_IF(priority == tools::tx_priority_flash, tools::error::wallet_internal_error, "Can not request a flash TX for asset burn transactions");
+    THROW_WALLET_EXCEPTION_IF(priority == tools::tx_priority_flash, tools::error::wallet_internal_error, "Can not request a flash TX for token burn transactions");
 
     std::vector<uint8_t> extra;
     for (const auto& burn : burn_requests)
     {
-      cryptonote::tx_extra_asset_descriptor_operation ado{};
-      ado.operation_type = cryptonote::asset_descriptor_operation_type::burn_asset;
-      ado.fields         = static_cast<uint8_t>(cryptonote::asset_field_asset_id |
-                                                cryptonote::asset_field_amount);
-      ado.asset_id       = burn.asset_id;
-      ado.amount         = burn.amount;
+      cryptonote::tx_extra_token_descriptor_operation tdo{};
+      tdo.operation_type = cryptonote::token_descriptor_operation_type::burn_token;
+      tdo.fields         = static_cast<uint8_t>(cryptonote::token_field_token_id |
+                                                cryptonote::token_field_amount);
+      tdo.token_id       = burn.token_id;
+      tdo.amount         = burn.amount;
 
       THROW_WALLET_EXCEPTION_IF(
-          !cryptonote::add_asset_descriptor_operation_to_tx_extra(extra, ado),
+          !cryptonote::add_token_descriptor_operation_to_tx_extra(extra, tdo),
           tools::error::wallet_internal_error,
-          "Failed to encode asset burn operation into tx extra");
-      LOG_PRINT_L0("Asset ID: " << tools::type_to_hex(burn.asset_id));
+          "Failed to encode token burn operation into tx extra");
+      LOG_PRINT_L0("Token ID: " << tools::type_to_hex(burn.token_id));
       LOG_PRINT_L0("Amount: " << burn.amount);
     }
     LOG_PRINT_L0("Extra size: " << extra.size());
 
-    auto ptx_vector = m_wallet->create_asset_burn_tx(
-        burn_requests.front().asset_id,
+    auto ptx_vector = m_wallet->create_token_burn_tx(
+        burn_requests.front().token_id,
         burn_requests.front().amount,
         cryptonote::TX_OUTPUT_DECOYS,
         priority,
@@ -8514,11 +8408,11 @@ bool simple_wallet::burn_asset(const std::vector<std::string>& args_)
       return false;
 
     auto success = success_msg_writer(true);
-    success << "Asset burn submitted";
+    success << "Token burn submitted";
     for (const auto& burn : burn_requests)
     {
       success
-          << "\n  Asset ID: " << tools::type_to_hex(burn.asset_id)
+          << "\n  Token ID: " << tools::type_to_hex(burn.token_id)
           << "\n  Amount:   " << burn.formatted_amount
           << (!burn.ticker.empty() ? " " + burn.ticker : "");
     }
@@ -8538,7 +8432,7 @@ bool simple_wallet::burn_asset(const std::vector<std::string>& args_)
   return true;
 }
 //----------------------------------------------------------------------------------------------------
-bool simple_wallet::update_asset(const std::vector<std::string>& args_)
+bool simple_wallet::update_token(const std::vector<std::string>& args_)
 {
   if (!try_connect_to_daemon())
     return false;
@@ -8551,30 +8445,30 @@ bool simple_wallet::update_asset(const std::vector<std::string>& args_)
 
   if (args.size() != 2)
   {
-    PRINT_USAGE(USAGE_UPDATE_ASSET);
+    PRINT_USAGE(USAGE_UPDATE_TOKEN);
     return false;
   }
 
-  crypto::asset_id asset_id;
-  if (!tools::hex_to_type(args[0], asset_id))
+  crypto::token_id token_id;
+  if (!tools::hex_to_type(args[0], token_id))
   {
-    fail_msg_writer() << tr("Failed to parse asset_id");
+    fail_msg_writer() << tr("Failed to parse token_id");
     return false;
   }
 
   nlohmann::json info_res;
-  if (!get_asset_info(args[0], info_res)) {
-    fail_msg_writer() << tr("Failed to fetch asset info from daemon.");
+  if (!get_token_info(args[0], info_res)) {
+    fail_msg_writer() << tr("Failed to fetch token info from daemon.");
     return false;
   }
 
   std::string requested_owner = tools::type_to_hex(m_wallet->get_account().get_keys().m_account_address.m_spend_public_key);
   if (!info_res.contains("owner") || info_res["owner"].get<std::string>() != requested_owner) {
-    fail_msg_writer() << tr("This wallet does not own the asset: ") << args[0];
+    fail_msg_writer() << tr("This wallet does not own the token: ") << args[0];
     return false;
   }
 
-  cryptonote::asset_descriptor_base adb{};
+  cryptonote::token_descriptor_base adb{};
   adb.version = info_res.value("version", 1);
   adb.total_max_supply = info_res.value("total_max_supply", (uint64_t)0);
   adb.current_supply = info_res.value("current_supply", (uint64_t)0);
@@ -8584,22 +8478,22 @@ bool simple_wallet::update_asset(const std::vector<std::string>& args_)
   adb.meta_info = info_res.value("meta_info", "");
   tools::hex_to_type(info_res.value("owner", ""), adb.owner);
 
-  // update_asset may only change meta_info (consensus rejects changes to
+  // update_token may only change meta_info (consensus rejects changes to
   // supply/ticker/full_name/decimal_point). `adb` holds the live on-chain
   // descriptor; load the file into a copy and adopt ONLY its meta_info,
   // preserving every other field from the chain. Otherwise the file's
-  // current_supply drifts from the on-chain supply after emit_asset and the
+  // current_supply drifts from the on-chain supply after mint_token and the
   // tx is rejected.
-  cryptonote::asset_descriptor_base file_adb = adb;
+  cryptonote::token_descriptor_base file_adb = adb;
   std::string error;
-  if (!load_asset_descriptor_from_json_file(fs::u8path(args[1]), file_adb, error))
+  if (!cryptonote::load_token_descriptor_from_json_file(fs::u8path(args[1]), file_adb, error, cryptonote::token_descriptor_json_mode::update))
   {
     fail_msg_writer() << error << ": " << args[1];
     return false;
   }
   if (file_adb.meta_info == adb.meta_info && file_adb.owner == adb.owner)
   {
-    fail_msg_writer() << tr("update_asset: meta_info and owner are unchanged, nothing to update");
+    fail_msg_writer() << tr("update_token: meta_info and owner are unchanged, nothing to update");
     return false;
   }
   adb.meta_info = file_adb.meta_info;
@@ -8611,22 +8505,22 @@ bool simple_wallet::update_asset(const std::vector<std::string>& args_)
 
   try
   {
-    cryptonote::tx_extra_asset_descriptor_operation ado{};
-    ado.operation_type = cryptonote::asset_descriptor_operation_type::update_asset;
-    ado.fields         = static_cast<uint8_t>(cryptonote::asset_field_descriptor |
-                                               cryptonote::asset_field_asset_id);
-    ado.descriptor     = adb;
-    ado.asset_id       = asset_id;
+    cryptonote::tx_extra_token_descriptor_operation tdo{};
+    tdo.operation_type = cryptonote::token_descriptor_operation_type::update_token;
+    tdo.fields         = static_cast<uint8_t>(cryptonote::token_field_descriptor |
+                                               cryptonote::token_field_token_id);
+    tdo.descriptor     = adb;
+    tdo.token_id       = token_id;
 
     std::vector<uint8_t> extra;
-    if (!cryptonote::add_asset_descriptor_operation_to_tx_extra(extra, ado))
+    if (!cryptonote::add_token_descriptor_operation_to_tx_extra(extra, tdo))
     {
-      fail_msg_writer() << tr("Failed to encode asset descriptor into tx extra");
+      fail_msg_writer() << tr("Failed to encode token descriptor into tx extra");
       return false;
     }
 
-    auto ptx_vector = m_wallet->create_asset_update_tx(
-        asset_id, cryptonote::TX_OUTPUT_DECOYS, priority, extra,
+    auto ptx_vector = m_wallet->create_token_update_tx(
+        token_id, cryptonote::TX_OUTPUT_DECOYS, priority, extra,
         m_current_subaddress_account, subaddr_indices);
 
     if (ptx_vector.empty())
@@ -8643,8 +8537,8 @@ bool simple_wallet::update_asset(const std::vector<std::string>& args_)
       return false;
 
     success_msg_writer(true)
-        << "Asset metainfo successfully updated\n"
-        << "  Asset ID:     " << tools::type_to_hex(asset_id) << "\n"
+        << "Token metainfo successfully updated\n"
+        << "  Token ID:     " << tools::type_to_hex(token_id) << "\n"
         << "  Ticker:       " << adb.ticker << "\n"
         << "  Full name:    " << adb.full_name;
   }
@@ -8668,7 +8562,7 @@ bool simple_wallet::sweep_unmixable(const std::vector<std::string> &args_)
   if (!try_connect_to_daemon())
     return true;
 
-  std::optional<crypto::asset_id> requested_asset_id;
+  std::optional<crypto::token_id> requested_token_id;
   if (args_.size() > 1)
   {
     PRINT_USAGE(USAGE_SWEEP_UNMIXABLE);
@@ -8676,13 +8570,13 @@ bool simple_wallet::sweep_unmixable(const std::vector<std::string> &args_)
   }
   if (!args_.empty())
   {
-    crypto::asset_id parsed_asset_id = crypto::null_aid;
-    if (args_[0].size() != 64 || !tools::hex_to_type(args_[0], parsed_asset_id))
+    crypto::token_id parsed_token_id = crypto::null_tid;
+    if (args_[0].size() != 64 || !tools::hex_to_type(args_[0], parsed_token_id))
     {
-      fail_msg_writer() << tr("Invalid asset id");
+      fail_msg_writer() << tr("Invalid token id");
       return true;
     }
-    requested_asset_id = parsed_asset_id;
+    requested_token_id = parsed_token_id;
   }
 
   SCOPED_WALLET_UNLOCK();
@@ -8690,7 +8584,7 @@ bool simple_wallet::sweep_unmixable(const std::vector<std::string> &args_)
   try
   {
     // figure out what tx will be necessary
-    auto ptx_vector = m_wallet->create_unmixable_sweep_transactions(requested_asset_id);
+    auto ptx_vector = m_wallet->create_unmixable_sweep_transactions(requested_token_id);
 
     if (ptx_vector.empty())
     {
@@ -8700,25 +8594,25 @@ bool simple_wallet::sweep_unmixable(const std::vector<std::string> &args_)
 
     // give user total and fee, and prompt to confirm
     uint64_t total_fee = 0;
-    std::map<crypto::asset_id, uint64_t> amounts_unmixable;
+    std::map<crypto::token_id, uint64_t> amounts_unmixable;
     for (size_t n = 0; n < ptx_vector.size(); ++n)
     {
       total_fee += ptx_vector[n].fee;
       for (auto i: ptx_vector[n].selected_transfers)
       {
         const auto& td = m_wallet->get_transfer_details(i);
-        amounts_unmixable[td.get_asset_id()] += td.amount();
+        amounts_unmixable[td.get_token_id()] += td.amount();
       }
-      amounts_unmixable[crypto::null_aid] -= ptx_vector[n].change_dts.amount + ptx_vector[n].fee;
+      amounts_unmixable[crypto::null_tid] -= ptx_vector[n].change_dts.amount + ptx_vector[n].fee;
     }
 
     std::string sent_str;
-    for (const auto& [asset_id, amount] : amounts_unmixable)
+    for (const auto& [token_id, amount] : amounts_unmixable)
     {
       if (amount == 0) continue;
       if (!sent_str.empty())
         sent_str += " and ";
-      sent_str += format_amount_with_asset_id(*m_wallet, amount, asset_id == crypto::null_aid ? "" : tools::type_to_hex(asset_id), true);
+      sent_str += format_amount_with_token_id(*m_wallet, amount, token_id == crypto::null_tid ? "" : tools::type_to_hex(token_id), true);
     }
 
     std::string prompt_str = tr("Sweeping ") + sent_str;
@@ -8808,15 +8702,15 @@ bool simple_wallet::sweep_main_internal(sweep_type_t sweep_type, std::vector<too
       return true;
     }
 
-    size_t asset_input_count = 0;
+    size_t token_input_count = 0;
     for (auto i: ptx_vector[0].selected_transfers)
-      asset_input_count += m_wallet->get_transfer_details(i).get_asset_id() != crypto::null_aid;
+      token_input_count += m_wallet->get_transfer_details(i).get_token_id() != crypto::null_tid;
 
-    if (asset_input_count > 0)
+    if (token_input_count > 0)
     {
-      if (asset_input_count != 1)
+      if (token_input_count != 1)
       {
-        fail_msg_writer() << tr("The transaction uses multiple or no asset inputs, which is not supposed to happen");
+        fail_msg_writer() << tr("The transaction uses multiple or no token inputs, which is not supposed to happen");
         return true;
       }
     }
@@ -8829,7 +8723,7 @@ bool simple_wallet::sweep_main_internal(sweep_type_t sweep_type, std::vector<too
 
   // give user total and fee, and prompt to confirm
   uint64_t total_fee = 0;
-  std::map<crypto::asset_id, uint64_t> amounts_sent;
+  std::map<crypto::token_id, uint64_t> amounts_sent;
   for (size_t n = 0; n < ptx_vector.size(); ++n)
   {
     total_fee += ptx_vector[n].fee;
@@ -8837,22 +8731,22 @@ bool simple_wallet::sweep_main_internal(sweep_type_t sweep_type, std::vector<too
     for (auto i: ptx_vector[n].selected_transfers)
     {
       const auto& td = m_wallet->get_transfer_details(i);
-      amounts_sent[td.get_asset_id()] += td.amount();
+      amounts_sent[td.get_token_id()] += td.amount();
     }
 
     // Always subtract the BDX change and the BDX fee from the BDX inputs.
-    // This ensures that if BDX was only pulled in to pay the fee for an asset
+    // This ensures that if BDX was only pulled in to pay the fee for an token
     // transfer, its net "swept" amount becomes 0 and won't be misleadingly shown.
-    amounts_sent[crypto::null_aid] -= ptx_vector[n].change_dts.amount + ptx_vector[n].fee;
+    amounts_sent[crypto::null_tid] -= ptx_vector[n].change_dts.amount + ptx_vector[n].fee;
   }
 
   std::string sent_str;
-  for (const auto& [asset_id, amount] : amounts_sent)
+  for (const auto& [token_id, amount] : amounts_sent)
   {
     if (amount == 0) continue;
     if (!sent_str.empty())
       sent_str += " and ";
-    sent_str += format_amount_with_asset_id(*m_wallet, amount, asset_id == crypto::null_aid ? "" : tools::type_to_hex(asset_id), true);
+    sent_str += format_amount_with_token_id(*m_wallet, amount, token_id == crypto::null_tid ? "" : tools::type_to_hex(token_id), true);
   }
 
   std::ostringstream prompt;
@@ -8961,7 +8855,7 @@ bool simple_wallet::sweep_main_internal(sweep_type_t sweep_type, std::vector<too
   return true;
 }
 
-bool simple_wallet::sweep_main(uint32_t account, uint64_t below, Transfer transfer_type, const std::vector<std::string> &args_, bool plain_address_sweeps_all_assets)
+bool simple_wallet::sweep_main(uint32_t account, uint64_t below, Transfer transfer_type, const std::vector<std::string> &args_, bool plain_address_sweeps_all_tokens)
 {
   auto print_usage = [this, account, below]()
   {
@@ -9075,23 +8969,23 @@ bool simple_wallet::sweep_main(uint32_t account, uint64_t below, Transfer transf
   }
 
   std::string addr;
-  std::optional<crypto::asset_id> requested_asset_id;
-  asset_prefixed_address_mode address_mode = asset_prefixed_address_mode::plain_address;
+  std::optional<crypto::token_id> requested_token_id;
+  token_prefixed_address_mode address_mode = token_prefixed_address_mode::plain_address;
   if (local_args.size() > 0)
     addr = local_args[0];
   else
     addr = m_wallet->get_subaddress_as_str({m_current_subaddress_account, 0});
 
   std::string parsed_address;
-  crypto::asset_id parsed_asset_id = crypto::null_aid;
-  if (!parse_asset_prefixed_address_arg(addr, parsed_asset_id, parsed_address, &address_mode))
+  crypto::token_id parsed_token_id = crypto::null_tid;
+  if (!parse_token_prefixed_address_arg(addr, parsed_token_id, parsed_address, &address_mode))
   {
-    fail_msg_writer() << tr("failed to parse asset id in address");
+    fail_msg_writer() << tr("failed to parse token id in address");
     print_usage();
     return true;
   }
-  if (parsed_asset_id != crypto::null_aid)
-    requested_asset_id = parsed_asset_id;
+  if (parsed_token_id != crypto::null_tid)
+    requested_token_id = parsed_token_id;
 
   cryptonote::address_parse_info info;
   if (!cryptonote::get_account_address_from_str(info, m_wallet->nettype(), parsed_address))
@@ -9117,10 +9011,10 @@ bool simple_wallet::sweep_main(uint32_t account, uint64_t below, Transfer transf
   try
   {
     const auto selection_mode =
-        plain_address_sweeps_all_assets && address_mode == asset_prefixed_address_mode::plain_address
-            ? tools::wallet2::sweep_selection_mode::native_and_all_assets
+        plain_address_sweeps_all_tokens && address_mode == token_prefixed_address_mode::plain_address
+            ? tools::wallet2::sweep_selection_mode::native_and_all_tokens
             : tools::wallet2::sweep_selection_mode::native_only;
-    auto ptx_vector = m_wallet->create_transactions_all(below, info.address, info.is_subaddress, outputs, cryptonote::TX_OUTPUT_DECOYS, unlock_block /* unlock_time */, priority, extra, account, subaddr_indices, requested_asset_id, cryptonote::txtype::standard, selection_mode);
+    auto ptx_vector = m_wallet->create_transactions_all(below, info.address, info.is_subaddress, outputs, cryptonote::TX_OUTPUT_DECOYS, unlock_block /* unlock_time */, priority, extra, account, subaddr_indices, requested_token_id, cryptonote::txtype::standard, selection_mode);
     sweep_main_internal(sweep_type_t::all_or_below, ptx_vector, info, priority == tools::tx_priority_flash);
   }
   catch (const std::exception &e)
@@ -9194,15 +9088,15 @@ bool simple_wallet::sweep_single(const std::vector<std::string> &args_)
   }
 
   std::string parsed_address;
-  std::optional<crypto::asset_id> requested_asset_id;
-  crypto::asset_id parsed_asset_id = crypto::null_aid;
-  if (!parse_asset_prefixed_address_arg(local_args[1], parsed_asset_id, parsed_address))
+  std::optional<crypto::token_id> requested_token_id;
+  crypto::token_id parsed_token_id = crypto::null_tid;
+  if (!parse_token_prefixed_address_arg(local_args[1], parsed_token_id, parsed_address))
   {
-    fail_msg_writer() << tr("failed to parse asset id in address");
+    fail_msg_writer() << tr("failed to parse token id in address");
     return true;
   }
-  if (parsed_asset_id != crypto::null_aid)
-    requested_asset_id = parsed_asset_id;
+  if (parsed_token_id != crypto::null_tid)
+    requested_token_id = parsed_token_id;
 
   cryptonote::address_parse_info info;
   if (!cryptonote::get_account_address_from_str(info, m_wallet->nettype(), parsed_address))
@@ -9227,7 +9121,7 @@ bool simple_wallet::sweep_single(const std::vector<std::string> &args_)
   try
   {
     // figure out what tx will be necessary
-    auto ptx_vector = m_wallet->create_transactions_single(ki, info.address, info.is_subaddress, outputs, cryptonote::TX_OUTPUT_DECOYS, 0 /* unlock_time */, priority, extra, requested_asset_id);
+    auto ptx_vector = m_wallet->create_transactions_single(ki, info.address, info.is_subaddress, outputs, cryptonote::TX_OUTPUT_DECOYS, 0 /* unlock_time */, priority, extra, requested_token_id);
     sweep_main_internal(sweep_type_t::single, ptx_vector, info, priority == tools::tx_priority_flash);
   }
   catch (const std::exception& e)
@@ -9287,11 +9181,11 @@ bool simple_wallet::sweep_below(const std::vector<std::string> &args_)
 bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes, const std::function<const wallet::tx_construction_data&(size_t)> &get_tx, const std::string &extra_message)
 {
   // gather info to ask the user
-  std::map<crypto::asset_id, uint64_t> amounts, amounts_to_dests, changes;
+  std::map<crypto::token_id, uint64_t> amounts, amounts_to_dests, changes;
   size_t min_ring_size = ~0;
   struct dest_info {
     std::string address;
-    std::map<crypto::asset_id, uint64_t> amounts;
+    std::map<crypto::token_id, uint64_t> amounts;
   };
   std::unordered_map<cryptonote::account_public_address, dest_info> dests;
   int first_known_non_zero_change_index = -1;
@@ -9342,7 +9236,7 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
 
     for (size_t s = 0; s < cd.sources.size(); ++s)
     {
-      amounts[cd.sources[s].asset_id] += cd.sources[s].amount;
+      amounts[cd.sources[s].token_id] += cd.sources[s].amount;
       size_t ring_size = cd.sources[s].outputs.size();
       if (ring_size < min_ring_size)
         min_ring_size = ring_size;
@@ -9360,14 +9254,14 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
         address = standard_address;
       auto i = dests.find(entry.addr);
       if (i == dests.end())
-        dests.insert(std::make_pair(entry.addr, dest_info{address, {{entry.asset_id, entry.amount}}}));
+        dests.insert(std::make_pair(entry.addr, dest_info{address, {{entry.token_id, entry.amount}}}));
       else
-        i->second.amounts[entry.asset_id] += entry.amount;
-      amounts_to_dests[entry.asset_id] += entry.amount;
+        i->second.amounts[entry.token_id] += entry.amount;
+      amounts_to_dests[entry.token_id] += entry.amount;
     }
-    std::map<crypto::asset_id, uint64_t> explicit_amounts;
+    std::map<crypto::token_id, uint64_t> explicit_amounts;
     for (size_t d = 0; d < cd.dests.size(); ++d)
-      explicit_amounts[cd.dests[d].asset_id] += cd.dests[d].amount;
+      explicit_amounts[cd.dests[d].token_id] += cd.dests[d].amount;
 
     if (cd.change_dts.amount > 0)
     {
@@ -9377,7 +9271,7 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
         fail_msg_writer() << tr("Claimed change does not go to a paid address");
         return false;
       }
-      if (it->second.amounts[cd.change_dts.asset_id] < cd.change_dts.amount)
+      if (it->second.amounts[cd.change_dts.token_id] < cd.change_dts.amount)
       {
         fail_msg_writer() << tr("Claimed change is larger than payment to the change address");
         return false;
@@ -9389,29 +9283,29 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
         fail_msg_writer() << tr("Change goes to more than one address");
         return false;
       }
-      changes[cd.change_dts.asset_id] += cd.change_dts.amount;
-      it->second.amounts[cd.change_dts.asset_id] -= cd.change_dts.amount;
-      if (it->second.amounts[cd.change_dts.asset_id] == 0)
-        it->second.amounts.erase(cd.change_dts.asset_id);
+      changes[cd.change_dts.token_id] += cd.change_dts.amount;
+      it->second.amounts[cd.change_dts.token_id] -= cd.change_dts.amount;
+      if (it->second.amounts[cd.change_dts.token_id] == 0)
+        it->second.amounts.erase(cd.change_dts.token_id);
       if (it->second.amounts.empty())
         dests.erase(cd.change_dts.addr);
     }
 
-    for (const auto& [asset_id, amt] : amounts)
+    for (const auto& [token_id, amt] : amounts)
     {
-      if (asset_id == crypto::null_aid)
+      if (token_id == crypto::null_tid)
         continue;
-      uint64_t explicit_amt = explicit_amounts[asset_id];
+      uint64_t explicit_amt = explicit_amounts[token_id];
       if (amt > explicit_amt)
       {
-        uint64_t asset_change = amt - explicit_amt;
+        uint64_t token_change = amt - explicit_amt;
         auto it = dests.find(cd.change_dts.addr);
         if (it != dests.end())
         {
-          changes[asset_id] += asset_change;
-          it->second.amounts[asset_id] -= asset_change;
-          if (it->second.amounts[asset_id] == 0)
-            it->second.amounts.erase(asset_id);
+          changes[token_id] += token_change;
+          it->second.amounts[token_id] -= token_change;
+          if (it->second.amounts[token_id] == 0)
+            it->second.amounts.erase(token_id);
           if (it->second.amounts.empty())
             dests.erase(cd.change_dts.addr);
         }
@@ -9429,11 +9323,11 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
     if (!i->second.amounts.empty())
     {
       std::string amounts_str;
-      for (const auto& [asset_id, amt] : i->second.amounts)
+      for (const auto& [token_id, amt] : i->second.amounts)
       {
         if (amt == 0) continue;
         if (!amounts_str.empty()) amounts_str += " and ";
-        amounts_str += format_amount_with_asset_id(*m_wallet, amt, asset_id == crypto::null_aid ? "" : tools::type_to_hex(asset_id), true);
+        amounts_str += format_amount_with_token_id(*m_wallet, amt, token_id == crypto::null_tid ? "" : tools::type_to_hex(token_id), true);
       }
       if (!amounts_str.empty())
       {
@@ -9459,11 +9353,11 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
   if (!changes.empty())
   {
     std::string amounts_str;
-    for (const auto& [asset_id, amt] : changes)
+    for (const auto& [token_id, amt] : changes)
     {
       if (amt == 0) continue;
       if (!amounts_str.empty()) amounts_str += " and ";
-      amounts_str += format_amount_with_asset_id(*m_wallet, amt, asset_id == crypto::null_aid ? "" : tools::type_to_hex(asset_id), true);
+      amounts_str += format_amount_with_token_id(*m_wallet, amt, token_id == crypto::null_tid ? "" : tools::type_to_hex(token_id), true);
     }
     std::string address = get_account_address_as_str(m_wallet->nettype(), get_tx(0).subaddr_account > 0, get_tx(0).change_dts.addr);
     change_string += (boost::format(tr("%s change to %s")) % amounts_str % address).str();
@@ -9471,13 +9365,13 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
   else
     change_string += tr("no change");
 
-  uint64_t fee = amounts[crypto::null_aid] - amounts_to_dests[crypto::null_aid];
+  uint64_t fee = amounts[crypto::null_tid] - amounts_to_dests[crypto::null_tid];
   std::string total_amounts_str;
-  for (const auto& [asset_id, amt] : amounts)
+  for (const auto& [token_id, amt] : amounts)
   {
     if (amt == 0) continue;
     if (!total_amounts_str.empty()) total_amounts_str += " and ";
-    total_amounts_str += format_amount_with_asset_id(*m_wallet, amt, asset_id == crypto::null_aid ? "" : tools::type_to_hex(asset_id), true);
+    total_amounts_str += format_amount_with_token_id(*m_wallet, amt, token_id == crypto::null_tid ? "" : tools::type_to_hex(token_id), true);
   }
   
   std::string prompt_str = (boost::format(tr("Loaded %lu transactions, for %s, fee %s, %s, %s, with min ring size %lu, %s. %sIs this okay?")) % (unsigned long)get_num_txes() % total_amounts_str % print_money(fee) % dest_string % change_string % (unsigned long)min_ring_size % payment_id_string % extra_message).str();
@@ -9798,8 +9692,8 @@ bool simple_wallet::check_tx_key(const std::vector<std::string> &args_)
     uint64_t received;
     bool in_pool = false;
     uint64_t confirmations;
-    std::map<crypto::asset_id, uint64_t> asset_received;
-    m_wallet->check_tx_key(txid, tx_key, additional_tx_keys, info.address, received, in_pool, confirmations, asset_received);
+    std::map<crypto::token_id, uint64_t> token_received;
+    m_wallet->check_tx_key(txid, tx_key, additional_tx_keys, info.address, received, in_pool, confirmations, token_received);
 
     if (received > 0)
     {
@@ -9871,8 +9765,8 @@ bool simple_wallet::check_tx_proof(const std::vector<std::string> &args)
     uint64_t received;
     bool in_pool = false;
     uint64_t confirmations;
-    std::map<crypto::asset_id, uint64_t> asset_received;
-    if (m_wallet->check_tx_proof(txid, info.address, info.is_subaddress, args.size() == 4 ? args[3] : "", sig_str, received, in_pool, confirmations, asset_received))
+    std::map<crypto::token_id, uint64_t> token_received;
+    if (m_wallet->check_tx_proof(txid, info.address, info.is_subaddress, args.size() == 4 ? args[3] : "", sig_str, received, in_pool, confirmations, token_received))
     {
       success_msg_writer(true) << tr("Good signature");
       if (received > 0)
@@ -10080,20 +9974,20 @@ bool simple_wallet::check_reserve_proof(const std::vector<std::string> &args)
   try
   {
     uint64_t total, spent;
-    std::map<crypto::asset_id, std::pair<uint64_t, uint64_t>> asset_totals;
-    if (m_wallet->check_reserve_proof(info.address, args.size() == 3 ? args[2] : "", sig_str, total, spent, asset_totals))
+    std::map<crypto::token_id, std::pair<uint64_t, uint64_t>> token_totals;
+    if (m_wallet->check_reserve_proof(info.address, args.size() == 3 ? args[2] : "", sig_str, total, spent, token_totals))
     {
       success_msg_writer(true) << fmt::format(tr("Good signature -- total: {}, spent: {}, unspent: {}\n"), print_money(total), print_money(spent), print_money(total - spent));
-      for (const auto& [asset_id, amounts] : asset_totals)
+      for (const auto& [token_id, amounts] : token_totals)
       {
         uint64_t a_total = amounts.first;
         uint64_t a_spent = amounts.second;
-        const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-        const std::string f_total = asset_info ? print_asset_amount(a_total, asset_info->decimal_point) : std::to_string(a_total);
-        const std::string f_spent = asset_info ? print_asset_amount(a_spent, asset_info->decimal_point) : std::to_string(a_spent);
-        const std::string f_unspent = asset_info ? print_asset_amount(a_total - a_spent, asset_info->decimal_point) : std::to_string(a_total - a_spent);
-        std::string ticker = asset_info && !asset_info->ticker.empty() ? " (" + asset_info->ticker + ")" : "";
-        success_msg_writer(true) << fmt::format(tr("Asset {}{} -- total: {}, spent: {}, unspent: {}\n"), tools::type_to_hex(asset_id), ticker, f_total, f_spent, f_unspent);
+        const auto token_info = get_token_display_info(*m_wallet, token_id);
+        const std::string f_total = token_info ? print_token_amount(a_total, token_info->decimal_point) : std::to_string(a_total);
+        const std::string f_spent = token_info ? print_token_amount(a_spent, token_info->decimal_point) : std::to_string(a_spent);
+        const std::string f_unspent = token_info ? print_token_amount(a_total - a_spent, token_info->decimal_point) : std::to_string(a_total - a_spent);
+        std::string ticker = token_info && !token_info->ticker.empty() ? " (" + token_info->ticker + ")" : "";
+        success_msg_writer(true) << fmt::format(tr("Token {}{} -- total: {}, spent: {}, unspent: {}\n"), tools::type_to_hex(token_id), ticker, f_total, f_spent, f_unspent);
       }
     }
     else
@@ -10263,12 +10157,12 @@ bool simple_wallet::show_transfers(const std::vector<std::string> &args_)
             transfer.pay_type == wallet::pay_type::bns ||
             transfer.pay_type == wallet::pay_type::miner)
           destinations += output.address.substr(0, 6);
-        else if (transfer.pay_type == wallet::pay_type::coin_burn || transfer.pay_type == wallet::pay_type::burn_asset || transfer.pay_type == wallet::pay_type::update_asset){
+        else if (transfer.pay_type == wallet::pay_type::coin_burn || transfer.pay_type == wallet::pay_type::burn_token || transfer.pay_type == wallet::pay_type::update_token){
             destinations = "-"; continue;}
         else
           destinations += output.address;
 
-        destinations += ":" + format_amount_with_asset_id(*m_wallet, output.amount, output.asset_id);
+        destinations += ":" + format_amount_with_token_id(*m_wallet, output.amount, output.token_id);
       }
     }
 
@@ -10283,7 +10177,7 @@ bool simple_wallet::show_transfers(const std::vector<std::string> &args_)
       , transfer.lock_msg
       , (transfer.checkpointed ? "checkpointed" : transfer.was_flash ? "flash" : "no")
       , tools::get_human_readable_timestamp(transfer.timestamp)
-      , format_amount_with_asset_id(*m_wallet, transfer.amount, transfer.asset_id)
+      , format_amount_with_token_id(*m_wallet, transfer.amount, transfer.token_id)
       , tools::type_to_hex(transfer.hash)
       , transfer.payment_id
       , print_money(transfer.fee)
@@ -10324,14 +10218,14 @@ bool simple_wallet::export_transfers(const std::vector<std::string>& args_)
   fs::ofstream file{fs::u8path(filename_str)};
 
   const bool formatting = true;
-  auto get_asset_info = [this](const crypto::asset_id& asset_id) -> std::pair<std::string, uint8_t> {
-    auto info = get_asset_display_info(*m_wallet, asset_id);
+  auto get_token_info = [this](const crypto::token_id& token_id) -> std::pair<std::string, uint8_t> {
+    auto info = get_token_display_info(*m_wallet, token_id);
     if (info)
-      return {info->ticker.empty() ? tools::type_to_hex(asset_id) : info->ticker, info->decimal_point};
-    return {tools::type_to_hex(asset_id), 0};
+      return {info->ticker.empty() ? tools::type_to_hex(token_id) : info->ticker, info->decimal_point};
+    return {tools::type_to_hex(token_id), 0};
   };
 
-  file << m_wallet->transfers_to_csv(all_transfers, formatting, get_asset_info);
+  file << m_wallet->transfers_to_csv(all_transfers, formatting, get_token_info);
   file.close();
 
   success_msg_writer() << tr("CSV exported to ") << filename_str;
@@ -10387,7 +10281,7 @@ bool simple_wallet::unspent_outputs(const std::vector<std::string> &args_)
   }
   tools::wallet2::transfer_container transfers;
   m_wallet->get_transfers(transfers);
-  std::map<std::pair<crypto::asset_id, uint64_t>, tools::wallet2::transfer_container> amount_to_tds;
+  std::map<std::pair<crypto::token_id, uint64_t>, tools::wallet2::transfer_container> amount_to_tds;
   uint64_t min_height = std::numeric_limits<uint64_t>::max();
   uint64_t max_height = 0;
   uint64_t found_min_amount = std::numeric_limits<uint64_t>::max();
@@ -10398,7 +10292,7 @@ bool simple_wallet::unspent_outputs(const std::vector<std::string> &args_)
     uint64_t amount = td.amount();
     if (td.m_spent || amount < min_amount || amount > max_amount || td.m_subaddr_index.major != m_current_subaddress_account || (subaddr_indices.count(td.m_subaddr_index.minor) == 0 && !subaddr_indices.empty()))
       continue;
-    amount_to_tds[{td.m_asset_id, amount}].push_back(td);
+    amount_to_tds[{td.m_token_id, amount}].push_back(td);
     if (min_height > td.m_block_height) min_height = td.m_block_height;
     if (max_height < td.m_block_height) max_height = td.m_block_height;
     ++count;
@@ -10408,27 +10302,27 @@ bool simple_wallet::unspent_outputs(const std::vector<std::string> &args_)
     success_msg_writer() << tr("There is no unspent output in the specified address");
     return true;
   }
-  std::map<crypto::asset_id, uint64_t> asset_min_amount;
-  std::map<crypto::asset_id, uint64_t> asset_max_amount;
+  std::map<crypto::token_id, uint64_t> token_min_amount;
+  std::map<crypto::token_id, uint64_t> token_max_amount;
   for (const auto& amount_tds : amount_to_tds)
   {
     auto& tds = amount_tds.second;
-    const crypto::asset_id& asset_id = amount_tds.first.first;
+    const crypto::token_id& token_id = amount_tds.first.first;
     uint64_t amount = amount_tds.first.second;
 
-    if (asset_min_amount.find(asset_id) == asset_min_amount.end() || amount < asset_min_amount[asset_id])
-      asset_min_amount[asset_id] = amount;
-    if (asset_max_amount.find(asset_id) == asset_max_amount.end() || amount > asset_max_amount[asset_id])
-      asset_max_amount[asset_id] = amount;
+    if (token_min_amount.find(token_id) == token_min_amount.end() || amount < token_min_amount[token_id])
+      token_min_amount[token_id] = amount;
+    if (token_max_amount.find(token_id) == token_max_amount.end() || amount > token_max_amount[token_id])
+      token_max_amount[token_id] = amount;
 
     std::string amount_str;
-    if (asset_id == crypto::null_aid) {
+    if (token_id == crypto::null_tid) {
       amount_str = print_money(amount);
     } else {
-      const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-      std::string ticker = asset_info && !asset_info->ticker.empty() ? asset_info->ticker : tools::type_to_hex(asset_id).substr(0, 6);
-      uint8_t decimals = asset_info ? asset_info->decimal_point : 0;
-      amount_str = print_asset_amount(amount, decimals, false) + " (" + ticker + ")";
+      const auto token_info = get_token_display_info(*m_wallet, token_id);
+      std::string ticker = token_info && !token_info->ticker.empty() ? token_info->ticker : tools::type_to_hex(token_id).substr(0, 6);
+      uint8_t decimals = token_info ? token_info->decimal_point : 0;
+      amount_str = print_token_amount(amount, decimals, false) + " (" + ticker + ")";
     }
 
     success_msg_writer() << tr("\nAmount: ") << amount_str << tr(", number of keys: ") << tds.size();
@@ -10444,28 +10338,28 @@ bool simple_wallet::unspent_outputs(const std::vector<std::string> &args_)
     << tr("\nMin block height: ") << min_height
     << tr("\nMax block height: ") << max_height;
     
-  for (const auto& [asset_id, min_amt] : asset_min_amount) {
+  for (const auto& [token_id, min_amt] : token_min_amount) {
     std::string amount_str;
-    if (asset_id == crypto::null_aid) {
+    if (token_id == crypto::null_tid) {
       amount_str = print_money(min_amt) + " BDX";
     } else {
-      const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-      std::string ticker = asset_info && !asset_info->ticker.empty() ? asset_info->ticker : tools::type_to_hex(asset_id).substr(0, 6);
-      uint8_t decimals = asset_info ? asset_info->decimal_point : 0;
-      amount_str = print_asset_amount(min_amt, decimals, false) + " (" + ticker + ")";
+      const auto token_info = get_token_display_info(*m_wallet, token_id);
+      std::string ticker = token_info && !token_info->ticker.empty() ? token_info->ticker : tools::type_to_hex(token_id).substr(0, 6);
+      uint8_t decimals = token_info ? token_info->decimal_point : 0;
+      amount_str = print_token_amount(min_amt, decimals, false) + " (" + ticker + ")";
     }
     success_msg_writer() << tr("\nMin amount found: ") << amount_str;
   }
   
-  for (const auto& [asset_id, max_amt] : asset_max_amount) {
+  for (const auto& [token_id, max_amt] : token_max_amount) {
     std::string amount_str;
-    if (asset_id == crypto::null_aid) {
+    if (token_id == crypto::null_tid) {
       amount_str = print_money(max_amt) + " BDX";
     } else {
-      const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-      std::string ticker = asset_info && !asset_info->ticker.empty() ? asset_info->ticker : tools::type_to_hex(asset_id).substr(0, 6);
-      uint8_t decimals = asset_info ? asset_info->decimal_point : 0;
-      amount_str = print_asset_amount(max_amt, decimals, false) + " (" + ticker + ")";
+      const auto token_info = get_token_display_info(*m_wallet, token_id);
+      std::string ticker = token_info && !token_info->ticker.empty() ? token_info->ticker : tools::type_to_hex(token_id).substr(0, 6);
+      uint8_t decimals = token_info ? token_info->decimal_point : 0;
+      amount_str = print_token_amount(max_amt, decimals, false) + " (" + ticker + ")";
     }
     success_msg_writer() << tr("\nMax amount found: ") << amount_str;
   }
@@ -10970,8 +10864,8 @@ void simple_wallet::print_accounts(const std::string& tag)
   }
   success_msg_writer() << fmt::format(tr(" {:>15} {:>21} {:>21} {:>21}"), "Address", "Balance", "Unlocked balance", "Label");
   uint64_t total_balance = 0, total_unlocked_balance = 0;
-  std::map<crypto::asset_id, uint64_t> asset_total_balance;
-  std::map<crypto::asset_id, uint64_t> asset_total_unlocked_balance;
+  std::map<crypto::token_id, uint64_t> token_total_balance;
+  std::map<crypto::token_id, uint64_t> token_total_unlocked_balance;
 
   for (uint32_t account_index = 0; account_index < m_wallet->get_num_subaddress_accounts(); ++account_index)
   {
@@ -10986,32 +10880,32 @@ void simple_wallet::print_accounts(const std::string& tag)
       % print_money(m_wallet->unlocked_balance(account_index, false,NULL,NULL))
       % m_wallet->get_subaddress_label({account_index, 0});
 
-    const auto asset_bals = m_wallet->asset_balances(account_index, false);
-    const auto asset_unlocked_bals = m_wallet->asset_balances(account_index, true);
-    if (!asset_bals.empty()) {
-      size_t num_assets = asset_bals.size();
+    const auto token_bals = m_wallet->token_balances(account_index, false);
+    const auto token_unlocked_bals = m_wallet->token_balances(account_index, true);
+    if (!token_bals.empty()) {
+      size_t num_tokens = token_bals.size();
       size_t count = 0;
-      for (const auto& [asset_id, amount] : asset_bals) {
+      for (const auto& [token_id, amount] : token_bals) {
         ++count;
         uint64_t unlocked_amount = 0;
-        auto unlocked_it = asset_unlocked_bals.find(asset_id);
-        if (unlocked_it != asset_unlocked_bals.end())
+        auto unlocked_it = token_unlocked_bals.find(token_id);
+        if (unlocked_it != token_unlocked_bals.end())
           unlocked_amount = unlocked_it->second;
 
-        asset_total_balance[asset_id] += amount;
-        asset_total_unlocked_balance[asset_id] += unlocked_amount;
+        token_total_balance[token_id] += amount;
+        token_total_unlocked_balance[token_id] += unlocked_amount;
 
-        const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-        const std::string formatted_amount = asset_info ? print_asset_amount(amount, asset_info->decimal_point, false) : std::to_string(amount);
-        const std::string formatted_unlocked = asset_info ? print_asset_amount(unlocked_amount, asset_info->decimal_point, false) : std::to_string(unlocked_amount);
+        const auto token_info = get_token_display_info(*m_wallet, token_id);
+        const std::string formatted_amount = token_info ? print_token_amount(amount, token_info->decimal_point, false) : std::to_string(amount);
+        const std::string formatted_unlocked = token_info ? print_token_amount(unlocked_amount, token_info->decimal_point, false) : std::to_string(unlocked_amount);
 
-        std::string asset_label = tools::type_to_hex(asset_id).substr(0, 6);
-        if (asset_info && !asset_info->ticker.empty())
-            asset_label = asset_info->ticker;
+        std::string token_label = tools::type_to_hex(token_id).substr(0, 6);
+        if (token_info && !token_info->ticker.empty())
+            token_label = token_info->ticker;
 
         success_msg_writer() << fmt::format("        {} {:<6s} {:>21s} {:>21s}", 
-            count == num_assets ? "\x1B[90m\xE2\x94\x94\xE2\x94\x80\x1B[0m" : "\x1B[90m\xE2\x94\x9C\xE2\x94\x80\x1B[0m",
-            asset_label,
+            count == num_tokens ? "\x1B[90m\xE2\x94\x94\xE2\x94\x80\x1B[0m" : "\x1B[90m\xE2\x94\x9C\xE2\x94\x80\x1B[0m",
+            token_label,
             formatted_amount,
             formatted_unlocked);
       }
@@ -11023,18 +10917,18 @@ void simple_wallet::print_accounts(const std::string& tag)
   success_msg_writer() << tr("----------------------------------------------------------------------------------");
   success_msg_writer() << fmt::format(tr("{:>15} {:>21} {:>21}"), "Total BDX", print_money(total_balance), print_money(total_unlocked_balance));
   
-  if (!asset_total_balance.empty()) {
-    for (const auto& [asset_id, amount] : asset_total_balance) {
-      uint64_t unlocked_amount = asset_total_unlocked_balance[asset_id];
-      const auto asset_info = get_asset_display_info(*m_wallet, asset_id);
-      const std::string formatted_amount = asset_info ? print_asset_amount(amount, asset_info->decimal_point, false) : std::to_string(amount);
-      const std::string formatted_unlocked = asset_info ? print_asset_amount(unlocked_amount, asset_info->decimal_point, false) : std::to_string(unlocked_amount);
+  if (!token_total_balance.empty()) {
+    for (const auto& [token_id, amount] : token_total_balance) {
+      uint64_t unlocked_amount = token_total_unlocked_balance[token_id];
+      const auto token_info = get_token_display_info(*m_wallet, token_id);
+      const std::string formatted_amount = token_info ? print_token_amount(amount, token_info->decimal_point, false) : std::to_string(amount);
+      const std::string formatted_unlocked = token_info ? print_token_amount(unlocked_amount, token_info->decimal_point, false) : std::to_string(unlocked_amount);
 
-      std::string asset_label = tools::type_to_hex(asset_id).substr(0, 6);
-      if (asset_info && !asset_info->ticker.empty())
-          asset_label = asset_info->ticker;
+      std::string token_label = tools::type_to_hex(token_id).substr(0, 6);
+      if (token_info && !token_info->ticker.empty())
+          token_label = token_info->ticker;
 
-      success_msg_writer() << fmt::format(tr("{:>15} {:>21} {:>21}"), "Total " + asset_label, formatted_amount, formatted_unlocked);
+      success_msg_writer() << fmt::format(tr("{:>15} {:>21} {:>21}"), "Total " + token_label, formatted_amount, formatted_unlocked);
     }
   }
 }
@@ -11881,16 +11775,16 @@ bool simple_wallet::show_transfer(const std::vector<std::string> &args)
       const tools::wallet2::confirmed_transfer_details &pd = i->second;
       uint64_t change = pd.m_change == (uint64_t)-1 ? 0 : pd.m_change; // change may not be known
       uint64_t fee = pd.m_amount_in - pd.m_amount_out;
-      std::string transfer_asset_id;
+      std::string transfer_token_id;
       if (!pd.m_dests.empty())
       {
-        transfer_asset_id = pd.m_dests.front().asset_id == crypto::null_aid ? "" : tools::type_to_hex(pd.m_dests.front().asset_id);
+        transfer_token_id = pd.m_dests.front().token_id == crypto::null_tid ? "" : tools::type_to_hex(pd.m_dests.front().token_id);
         for (const auto& d : pd.m_dests)
         {
-          const std::string dest_asset_id = d.asset_id == crypto::null_aid ? "" : tools::type_to_hex(d.asset_id);
-          if (dest_asset_id != transfer_asset_id)
+          const std::string dest_token_id = d.token_id == crypto::null_tid ? "" : tools::type_to_hex(d.token_id);
+          if (dest_token_id != transfer_token_id)
           {
-            transfer_asset_id.clear();
+            transfer_token_id.clear();
             break;
           }
         }
@@ -11899,8 +11793,8 @@ bool simple_wallet::show_transfer(const std::vector<std::string> &args)
       for (const auto &d: pd.m_dests) {
         if (!dests.empty())
           dests += ", ";
-        const std::string dest_asset_id = d.asset_id == crypto::null_aid ? "" : tools::type_to_hex(d.asset_id);
-        dests +=  d.address(m_wallet->nettype(), pd.m_payment_id) + ": " + format_amount_with_asset_id(*m_wallet, d.amount, dest_asset_id, true);
+        const std::string dest_token_id = d.token_id == crypto::null_tid ? "" : tools::type_to_hex(d.token_id);
+        dests +=  d.address(m_wallet->nettype(), pd.m_payment_id) + ": " + format_amount_with_token_id(*m_wallet, d.amount, dest_token_id, true);
       }
       std::string payment_id = tools::type_to_hex(i->second.m_payment_id);
       if (payment_id.substr(16).find_first_not_of('0') == std::string::npos)
@@ -11909,9 +11803,9 @@ bool simple_wallet::show_transfer(const std::vector<std::string> &args)
       success_msg_writer() << "txid: " << txid;
       success_msg_writer() << "Height: " << pd.m_block_height;
       success_msg_writer() << "Timestamp: " << tools::get_human_readable_timestamp(pd.m_timestamp);
-      success_msg_writer() << "Amount: " << format_amount_with_asset_id(*m_wallet, pd.m_amount_in - change - fee, transfer_asset_id, true);
+      success_msg_writer() << "Amount: " << format_amount_with_token_id(*m_wallet, pd.m_amount_in - change - fee, transfer_token_id, true);
       success_msg_writer() << "Payment ID: " << payment_id;
-      success_msg_writer() << "Change: " << format_amount_with_asset_id(*m_wallet, change, transfer_asset_id);
+      success_msg_writer() << "Change: " << format_amount_with_token_id(*m_wallet, change, transfer_token_id);
       success_msg_writer() << "Fee: " << print_money(fee);
       success_msg_writer() << "Destinations: " << dests;
       if (pd.m_unlock_time < MAX_BLOCK_NUMBER)
@@ -11973,16 +11867,16 @@ bool simple_wallet::show_transfer(const std::vector<std::string> &args)
       const tools::wallet2::unconfirmed_transfer_details &pd = i->second;
       uint64_t amount = pd.m_amount_in;
       uint64_t fee = amount - pd.m_amount_out;
-      std::string transfer_asset_id;
+      std::string transfer_token_id;
       if (!pd.m_dests.empty())
       {
-        transfer_asset_id = pd.m_dests.front().asset_id == crypto::null_aid ? "" : tools::type_to_hex(pd.m_dests.front().asset_id);
+        transfer_token_id = pd.m_dests.front().token_id == crypto::null_tid ? "" : tools::type_to_hex(pd.m_dests.front().token_id);
         for (const auto& d : pd.m_dests)
         {
-          const std::string dest_asset_id = d.asset_id == crypto::null_aid ? "" : tools::type_to_hex(d.asset_id);
-          if (dest_asset_id != transfer_asset_id)
+          const std::string dest_token_id = d.token_id == crypto::null_tid ? "" : tools::type_to_hex(d.token_id);
+          if (dest_token_id != transfer_token_id)
           {
-            transfer_asset_id.clear();
+            transfer_token_id.clear();
             break;
           }
         }
@@ -11995,9 +11889,9 @@ bool simple_wallet::show_transfer(const std::vector<std::string> &args)
       success_msg_writer() << (is_failed ? "Failed" : "Pending") << " outgoing transaction found";
       success_msg_writer() << "txid: " << txid;
       success_msg_writer() << "Timestamp: " << tools::get_human_readable_timestamp(pd.m_timestamp);
-      success_msg_writer() << "Amount: " << format_amount_with_asset_id(*m_wallet, amount - pd.m_change - fee, transfer_asset_id, true);
+      success_msg_writer() << "Amount: " << format_amount_with_token_id(*m_wallet, amount - pd.m_change - fee, transfer_token_id, true);
       success_msg_writer() << "Payment ID: " << payment_id;
-      success_msg_writer() << "Change: " << format_amount_with_asset_id(*m_wallet, pd.m_change, transfer_asset_id);
+      success_msg_writer() << "Change: " << format_amount_with_token_id(*m_wallet, pd.m_change, transfer_token_id);
       success_msg_writer() << "Fee: " << print_money(fee);
       success_msg_writer() << "Note: " << m_wallet->get_tx_note(txid);
       found = true;

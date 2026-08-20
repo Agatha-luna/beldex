@@ -49,11 +49,11 @@ enum struct pay_type
   governance,
   bns,
   coin_burn,
-  gateway, // HF22 gateway address register/update
-  deploy_asset,
-  emit_asset,
-  update_asset,
-  burn_asset
+  register_token,
+  mint_token,
+  update_token,
+  burn_token,
+  gateway // HF23 gateway address register/update
 };
 
 inline const char *pay_type_string(pay_type type)
@@ -69,11 +69,11 @@ inline const char *pay_type_string(pay_type type)
     case pay_type::master_node: return "mnode";
     case pay_type::governance:   return "gov";
     case pay_type::coin_burn:   return "burn";
+    case pay_type::register_token: return "register";
+    case pay_type::mint_token:   return "mint";
+    case pay_type::update_token: return "update";
+    case pay_type::burn_token:   return "burn_token";
     case pay_type::gateway:     return "gateway";
-    case pay_type::deploy_asset: return "deploy";
-    case pay_type::emit_asset:   return "emit";
-    case pay_type::update_asset: return "update";
-    case pay_type::burn_asset:   return "burn_asset";
     default: assert(false);      return "xxxxx";
   }
 }
@@ -85,12 +85,12 @@ inline pay_type pay_type_from_tx(const cryptonote::transaction tx)
     case cryptonote::txtype::stake: return wallet::pay_type::stake;
     case cryptonote::txtype::beldex_name_system: return wallet::pay_type::bns;
     case cryptonote::txtype::coin_burn: return wallet::pay_type::coin_burn;
+    case cryptonote::txtype::register_private_token: return wallet::pay_type::register_token;
+    case cryptonote::txtype::mint_token: return wallet::pay_type::mint_token;
+    case cryptonote::txtype::update_token: return wallet::pay_type::update_token;
+    case cryptonote::txtype::burn_token: return wallet::pay_type::burn_token;
     case cryptonote::txtype::register_gateway_address:
     case cryptonote::txtype::update_gateway_address: return wallet::pay_type::gateway;
-    case cryptonote::txtype::deploy_new_asset: return wallet::pay_type::deploy_asset;
-    case cryptonote::txtype::emit_asset: return wallet::pay_type::emit_asset;
-    case cryptonote::txtype::update_asset: return wallet::pay_type::update_asset;
-    case cryptonote::txtype::burn_asset: return wallet::pay_type::burn_asset;
     default: return wallet::pay_type::out;
   }
 }
@@ -103,7 +103,7 @@ struct transfer_view
   uint64_t height;                                           // Height of the first block that confirmed this transfer (0 if not mined yet).
   uint64_t timestamp;                                        // UNIX timestamp for when this transfer was first confirmed in a block (or timestamp submission if not mined yet).
   uint64_t amount;                                           // Amount transferred.
-  std::string asset_id;                                      // Empty = native BDX, otherwise hex-encoded asset id.
+  std::string token_id;                                      // Empty = native BDX, otherwise hex-encoded token id.
   uint64_t fee;                                              // Transaction fee for this transfer.
   std::string note;                                          // Note about this transfer.
   std::list<transfer_destination> destinations;              // Array of transfer destinations.

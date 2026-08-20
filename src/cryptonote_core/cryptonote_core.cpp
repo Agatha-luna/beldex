@@ -1655,9 +1655,9 @@ namespace cryptonote
 
     if (tx.version >= txversion::v2_ringct)
     {
-      // Gateway deposit outputs (tx_out_gateway, HF22) are transparent and
-      // confidential-asset zarcanum outputs (tx_out_zarcanum, HF23) carry their
-      // own commitments in asset_proofs, so neither is part of the RCT outPk
+      // Gateway deposit outputs (tx_out_gateway, HF23) are transparent and
+      // private-token zarcanum outputs (tx_out_zarcanum, HF22) carry their
+      // own commitments in token_proofs, so neither is part of the RCT outPk
       // array. outPk covers the native (txout_to_key) outputs only; count those.
       const size_t native_outputs = std::count_if(tx.vout.begin(), tx.vout.end(), [](const tx_out& out) {
         return !std::holds_alternative<tx_out_gateway>(out.target) &&

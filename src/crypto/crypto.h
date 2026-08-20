@@ -83,11 +83,7 @@ namespace crypto {
 
   struct key_image: ec_point {};
 
-  // Asset identifier for confidential assets. Cherry-picked from the
-  // feature-confidential-asset branch (crypto.h) so gateway code can use
-  // crypto::asset_id / null_aid from day 1 and the later CA merge is a no-op.
-  // null_aid is the permanent sentinel for native BDX.
-  struct asset_id : ec_point {};
+  struct token_id : ec_point {};
 
   struct signature {
     ec_scalar c, r;
@@ -125,7 +121,7 @@ namespace crypto {
     operator bool() const { return memcmp(data, null().data, sizeof(data)); }
   };
 
-  // --- Gateway address (HF22) foreign-curve owner-key types ---------------
+  // --- Gateway address (HF23) foreign-curve owner-key types ---------------
   // Data-only definitions so the gateway owner-key/signature variants and the
   // wire structs compile. The generate/verify implementations (vendored
   // bitcoin-core/secp256k1 for eth, RFC-8032 EdDSA ported from Zano) are the
@@ -174,7 +170,7 @@ namespace crypto {
   static_assert(sizeof(ec_point) == 32 && sizeof(ec_scalar) == 32 &&
     sizeof(public_key) == 32 && sizeof(secret_key) == 32 &&
     sizeof(key_derivation) == 32 && sizeof(key_image) == 32 &&
-    sizeof(asset_id) == 32 &&
+    sizeof(token_id) == 32 &&
     sizeof(eth_public_key) == 33 && sizeof(eth_signature) == 64 &&
     sizeof(eddsa_public_key) == 32 && sizeof(eddsa_signature) == 64 &&
     sizeof(signature) == 64, "Invalid structure size");
@@ -231,9 +227,9 @@ namespace crypto {
    */
   bool check_key(const public_key &key);
 
-  /* Check an asset key. Returns true if it is valid, false otherwise.
+  /* Check an token key. Returns true if it is valid, false otherwise.
    */
-  bool check_asset_key(const asset_id &key);
+  bool check_token_key(const token_id &key);
 
   /* Stricter than check_key: returns true only if the key is a canonical
    * ed25519 encoding lying in the prime-order MAIN subgroup (rejects small-order
@@ -351,7 +347,7 @@ namespace crypto {
   inline std::ostream &operator <<(std::ostream &o, const crypto::key_image &v) {
     return o << '<' << tools::type_to_hex(v) << '>';
   }
-  inline std::ostream &operator <<(std::ostream &o, const crypto::asset_id &v) {
+  inline std::ostream &operator <<(std::ostream &o, const crypto::token_id &v) {
     return o << '<' << tools::type_to_hex(v) << '>';
   }
   inline std::ostream &operator <<(std::ostream &o, const crypto::signature &v) {
@@ -371,7 +367,7 @@ namespace crypto {
   }
   constexpr inline crypto::public_key null_pkey{};
   const inline crypto::secret_key null_skey{};
-  const inline crypto::asset_id null_aid{};
+  const inline crypto::token_id null_tid{};
 }
 
 CRYPTO_MAKE_HASHABLE(public_key)
@@ -380,6 +376,7 @@ CRYPTO_MAKE_HASHABLE(key_image)
 CRYPTO_MAKE_HASHABLE(signature)
 CRYPTO_MAKE_HASHABLE(ed25519_public_key)
 CRYPTO_MAKE_HASHABLE(x25519_public_key)
+CRYPTO_MAKE_HASHABLE(token_id)
 // eth/eddsa owner-key & signature types: comparable (needed for variant
 // equality and serialization round-trip tests) but not hashable — eth_public_key
 // is 33 bytes / 1-byte aligned and can't satisfy the hash alignment requirement,
@@ -388,4 +385,3 @@ CRYPTO_MAKE_COMPARABLE(eth_public_key)
 CRYPTO_MAKE_COMPARABLE(eth_signature)
 CRYPTO_MAKE_COMPARABLE(eddsa_public_key)
 CRYPTO_MAKE_COMPARABLE(eddsa_signature)
-CRYPTO_MAKE_HASHABLE(asset_id)

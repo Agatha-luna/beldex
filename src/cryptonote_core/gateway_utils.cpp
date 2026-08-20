@@ -1,6 +1,6 @@
 // Copyright (c) 2024, The Beldex Project
 //
-// Gateway address (HF22) consensus-state helpers. See gateway_utils.h.
+// Gateway address (HF23) consensus-state helpers. See gateway_utils.h.
 
 #include "gateway_utils.h"
 
@@ -88,14 +88,14 @@ namespace
     return sigs;
   }
 
-  // Mutate a materialized balance for one asset. Overflow on increase and
+  // Mutate a materialized balance for one token. Overflow on increase and
   // underflow on decrease both fail (block-invalidating at apply time).
-  bool change_gateway_balance(gateway_account_data& acct, const crypto::asset_id& aid,
+  bool change_gateway_balance(gateway_account_data& acct, const crypto::token_id& tid,
                               uint64_t amount, bool increase, std::string* reason)
   {
     for (auto& b : acct.balances)
     {
-      if (b.asset_id == aid)
+      if (b.token_id == tid)
       {
         if (increase)
         {
@@ -121,10 +121,10 @@ namespace
     // No existing entry.
     if (!increase)
     {
-      set_reason(reason, "gateway balance underflow on decrease (no balance for asset)");
+      set_reason(reason, "gateway balance underflow on decrease (no balance for token)");
       return false;
     }
-    acct.balances.push_back(gateway_balance_entry{aid, amount});
+    acct.balances.push_back(gateway_balance_entry{tid, amount});
     return true;
   }
 }
@@ -161,7 +161,7 @@ bool summarize_gateway_withdraw(network_type nettype, const transaction& tx,
 {
   out = {};
 
-  // Exactly one gateway input (single source), native asset only at HF22.
+  // Exactly one gateway input (single source), native token only at HF23.
   const txin_gateway* gin = nullptr;
   for (const auto& in : tx.vin)
   {
@@ -177,7 +177,7 @@ bool summarize_gateway_withdraw(network_type nettype, const transaction& tx,
     }
   }
   if (!gin) { reason = "tx is not a gateway withdrawal (no gateway input)"; return false; }
-  if (gin->asset_id != crypto::null_aid) { reason = "gateway input asset must be native at HF22"; return false; }
+  if (gin->token_id != crypto::null_tid) { reason = "gateway input token must be native at HF23"; return false; }
 
   out.source_gateway_id = gin->gateway_addr;
   out.total_debit       = gin->amount;
@@ -343,9 +343,9 @@ bool verify_gateway_wallet_balance(const transaction& tx, std::string& reason)
 
 rct::key gateway_balance_offset(const transaction& tx)
 {
-  // Σ gw_out·H − Σ gw_in·H − mask_point. Generator taken from asset_id
-  // (null_aid → H) so the post-CA relaxation (a·H_asset) is a lookup change,
-  // not a rewrite. HF22 rejects non-null asset ids, so H is always used here
+  // Σ gw_out·H − Σ gw_in·H − mask_point. Generator taken from token_id
+  // (null_tid → H) so a future multi-token relaxation (a·H_token) is a lookup
+  // change, not a rewrite. HF23 rejects non-null token ids, so H is always used here
   // for now. mask_point (present only on gw→wallet withdrawals, enforced in
   // validate_gateway_withdrawals) absorbs the derived output-commitment masks:
   // the RCT sum check then closes iff Σ b_i + fee == Σ gw_in and the proof
@@ -621,15 +621,15 @@ namespace
         return false;
       }
 
-      // HF22: native BDX only.
-      if (hf_version < feature::GATEWAY_ADDRESSES && g->asset_id != crypto::null_aid)
+      // HF23: native BDX only.
+      if (hf_version < feature::GATEWAY_ADDRESSES && g->token_id != crypto::null_tid)
       {
-        reason = "gateway output with non-native asset id before CA";
+        reason = "gateway output with non-native token id before gateway addresses activate";
         return false;
       }
-      if (g->asset_id != crypto::null_aid)
+      if (g->token_id != crypto::null_tid)
       {
-        reason = "gateway output asset_id must be null_aid at HF22";
+        reason = "gateway output token_id must be null_tid at HF23";
         return false;
       }
       // Stricter than Zano: amount must be strictly positive and in range.
@@ -647,7 +647,7 @@ namespace
     return true;
   }
 
-  // Validate withdrawal inputs (txin_gateway): asset id and the order-matched
+  // Validate withdrawal inputs (txin_gateway): token id and the order-matched
   // owner signature over H(GW_INPUT_SIG||prefix_hash) against the LATEST owner
   // key. Balance sufficiency is NOT checked here: this runs during block
   // validation against pre-block DB state, so a same-block deposit→withdraw must
@@ -726,9 +726,9 @@ namespace
         return false;
       }
 
-      if (g->asset_id != crypto::null_aid)
+      if (g->token_id != crypto::null_tid)
       {
-        reason = "gateway input asset_id must be null_aid at HF22";
+        reason = "gateway input token_id must be null_tid at HF23";
         return false;
       }
 
@@ -913,7 +913,7 @@ namespace
             set_reason(reason, "deposit to an unregistered gateway");
             return false;
           }
-          if (!change_gateway_balance(acct, g->asset_id, g->amount, /*increase=*/true, reason))
+          if (!change_gateway_balance(acct, g->token_id, g->amount, /*increase=*/true, reason))
             return false;
         }
       }
@@ -929,7 +929,7 @@ namespace
             set_reason(reason, "withdrawal from an unregistered gateway");
             return false;
           }
-          if (!change_gateway_balance(acct, g->asset_id, g->amount, /*increase=*/false, reason))
+          if (!change_gateway_balance(acct, g->token_id, g->amount, /*increase=*/false, reason))
             return false;
         }
       }
@@ -1003,7 +1003,7 @@ bool rewind_gateways_from_transactions(BlockchainDB& db, uint64_t height, const 
       {
         bool ok = false;
         gateway_account_data& acct = get(g->gateway_addr, ok);
-        if (!ok || !change_gateway_balance(acct, g->asset_id, g->amount, /*increase=*/true, reason))
+        if (!ok || !change_gateway_balance(acct, g->token_id, g->amount, /*increase=*/true, reason))
         {
           set_reason(reason, "failed to undo gateway withdrawal while rewinding");
           return false;
@@ -1018,7 +1018,7 @@ bool rewind_gateways_from_transactions(BlockchainDB& db, uint64_t height, const 
       {
         bool ok = false;
         gateway_account_data& acct = get(g->gateway_addr, ok);
-        if (!ok || !change_gateway_balance(acct, g->asset_id, g->amount, /*increase=*/false, reason))
+        if (!ok || !change_gateway_balance(acct, g->token_id, g->amount, /*increase=*/false, reason))
         {
           set_reason(reason, "failed to undo gateway deposit while rewinding");
           return false;

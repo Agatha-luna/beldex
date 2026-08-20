@@ -121,14 +121,14 @@ struct output_data_t
   uint64_t           unlock_time;  //!< the output's unlock time (or height)
   uint64_t           height;       //!< the height of the block which created the output
   rct::key           commitment;   //!< the output's amount commitment (for spend verification)
-  crypto::asset_id blinded_asset_id; //!< null for native outputs, blinded asset id for confidential asset outputs
+  crypto::token_id blinded_token_id; //!< null for native outputs, blinded token id for private token outputs
 };
 #pragma pack(pop)
 
 enum class output_distribution_type : uint8_t
 {
   native = 1,
-  asset = 2,
+  token = 2,
 };
 
 #pragma pack(push, 1)
@@ -1830,7 +1830,15 @@ public:
   /// found, false if not found.
   virtual bool remove_master_node_proof(const crypto::public_key &pubkey) = 0;
 
-  // Gateway accounts (HF22). Keyed by the gateway address id (== registrant's
+  // Private token history (HF22), consolidated into a single migration under
+  // the token_id/token_history naming.
+  virtual void set_token_history(const crypto::token_id &token_id, const std::string &data) = 0;
+  virtual bool get_token_history(const crypto::token_id &token_id, std::string &data) const = 0;
+  virtual bool remove_token_history(const crypto::token_id& token_id) = 0;
+  virtual bool token_exists(const crypto::token_id &token_id) const = 0;
+  virtual std::vector<crypto::token_id> get_all_token_ids() const = 0;
+
+  // Gateway accounts (HF23). Keyed by the gateway address id (== registrant's
   // view_pub_key); the value is a serialized cryptonote::gateway_account_data
   // blob. The DB layer is blob-agnostic; (de)serialization lives in gateway_utils.
   virtual void set_gateway_account(const crypto::public_key& gateway_addr, const std::string& data) = 0;
@@ -1839,7 +1847,7 @@ public:
   virtual bool gateway_exists(const crypto::public_key& gateway_addr) const = 0;
   virtual std::vector<crypto::public_key> get_all_gateway_ids() const = 0;
 
-  // Gateway transaction history (HF22) — the second gateway table (mirrors
+  // Gateway transaction history (HF23) — the second gateway table (mirrors
   // Zano's split of gateway state into an accounts table and a transactions
   // table). Maps a gateway address id to the list of transactions that touched
   // it (deposits, withdrawals, descriptor ops), stored as (height, tx_hash)
@@ -1849,13 +1857,6 @@ public:
   virtual void remove_gateway_tx(const crypto::public_key& gateway_addr, uint64_t height, const crypto::hash& tx_hash) = 0;
   // Returns up to `count` tx hashes (height-ascending) starting at `offset`.
   virtual std::vector<crypto::hash> get_gateway_txs(const crypto::public_key& gateway_addr, uint64_t offset, uint64_t count) const = 0;
-
-  // Confidential asset history (HF23).
-  virtual void set_asset_history(const crypto::asset_id &asset_id, const std::string &data) = 0;
-  virtual bool get_asset_history(const crypto::asset_id &asset_id, std::string &data) const = 0;
-  virtual bool remove_asset_history(const crypto::asset_id& asset_id) = 0;
-  virtual bool asset_exists(const crypto::asset_id &asset_id) const = 0;
-  virtual std::vector<crypto::asset_id> get_all_asset_ids() const = 0;
 
   // This function accepts an empty timestamps/difficulties array to fill, or
   // a prior timestamps/difficulties array that was filled by a previous call to
