@@ -1,4 +1,6 @@
 // Copyright (c) 2026, The Beldex Project
+#include <functional>
+
 #include "gtest/gtest.h"
 #include "blockchain_db/lmdb/db_lmdb.h"
 #include "cryptonote_core/token_history_utils.h"
@@ -54,7 +56,9 @@ protected:
   // These are valid inputs to the token-state validator, not fully signed
   // spend transactions. Ring signatures/range proofs are tested separately.
   transaction make_tx(size_t kind, bool duplicate = false, bool zy_input = true,
-                      bool wrong_output_commitment = false)
+                      bool wrong_output_commitment = false,
+                      const std::function<void(transaction&)>& mutate_before_proofs = {},
+                      const rct::key* ownership_secret = nullptr)
   {
     transaction tx{};
     tx.version = txversion::v4_tx_types;
@@ -102,6 +106,8 @@ protected:
         (duplicate && !add_token_descriptor_operation_to_tx_extra(tx.extra, op)))
       throw std::runtime_error("Cannot encode test operation");
     tx.output_unlock_times.resize(tx.vout.size());
+    if (mutate_before_proofs)
+      mutate_before_proofs(tx);
     crypto::hash prefix;
     get_transaction_prefix_hash(tx, prefix);
     const auto msg = rct::hash2rct(prefix);
@@ -114,10 +120,11 @@ protected:
         throw std::runtime_error("Cannot generate composition proof");
       tx.token_proofs.emplace_back(proof);
     }
-    if (kind == 1 || kind == 2)
+    if (kind == 0 || kind == 1 || kind == 2)
     {
+      const rct::key& secret = ownership_secret ? *ownership_secret : owner_secret;
       rct::token_operation_ownership_proof proof{};
-      if (!crypto::generate_schnorr_sig(msg, rct::pk2rct(registration.descriptor.owner), owner_secret, proof.sig))
+      if (!crypto::generate_schnorr_sig(msg, rct::scalarmultBase(secret), secret, proof.sig))
         throw std::runtime_error("Cannot generate ownership proof");
       tx.token_proofs.emplace_back(proof);
     }
@@ -270,6 +277,59 @@ TEST_F(TokenSecurity, EmissionCannotUseBurnCommitmentExemption)
     EXPECT_FALSE(validate(tx, reason));
     EXPECT_NE(reason.find("cross-typed"), std::string::npos) << reason;
   }
+}
+
+// H1 regression: a registration seen in the mempool cannot be re-issued with
+// the initial supply redirected. Every other proof on a register tx can be
+// rebuilt from tx-local secrets, so the ownership signature by the DECLARED
+// owner over the tx prefix hash (which covers vout) is what binds the supply
+// destinations to the owner.
+TEST_F(TokenSecurity, RegistrationCannotBeFrontRunToRedirectSupply)
+{
+  std::string reason;
+  const auto victim = make_tx(0);
+  ASSERT_TRUE(validate(victim, reason)) << reason;
+
+  // Missing ownership proof: rejected.
+  auto unsigned_reg = victim;
+  unsigned_reg.token_proofs.erase(
+      std::remove_if(unsigned_reg.token_proofs.begin(), unsigned_reg.token_proofs.end(),
+                     [](const auto& p) {
+                       return std::holds_alternative<rct::token_operation_ownership_proof>(p);
+                     }),
+      unsigned_reg.token_proofs.end());
+  EXPECT_FALSE(validate(unsigned_reg, reason));
+  EXPECT_NE(reason.find("ownership"), std::string::npos) << reason;
+
+  // Signed by a key other than the declared owner: rejected.
+  const rct::key attacker_secret = rct::d2h(99);
+  auto wrong_key = make_tx(0, false, true, false, {}, &attacker_secret);
+  EXPECT_FALSE(validate(wrong_key, reason));
+  EXPECT_NE(reason.find("ownership"), std::string::npos) << reason;
+
+  // The full front-run: the attacker rebuilds the registration with the same
+  // descriptor but the supply sent to their own stealth addresses, regenerates
+  // every tx-local proof (which they can), and transplants the victim's
+  // ownership signature, which no longer matches the rebuilt prefix hash.
+  const auto redirect_supply = [&attacker_secret](transaction& tx) {
+    for (auto& out : tx.vout)
+      if (auto* zy = std::get_if<tx_out_zyphora>(&out.target))
+        zy->stealth_address = rct::rct2pk(rct::scalarmultBase(attacker_secret));
+  };
+  auto front_run = make_tx(0, false, true, false, redirect_supply, &attacker_secret);
+  for (auto& p : front_run.token_proofs)
+    if (auto* mine = std::get_if<rct::token_operation_ownership_proof>(&p))
+      for (const auto& vp : victim.token_proofs)
+        if (const auto* theirs = std::get_if<rct::token_operation_ownership_proof>(&vp))
+          *mine = *theirs;
+  EXPECT_FALSE(validate(front_run, reason));
+  EXPECT_NE(reason.find("ownership"), std::string::npos) << reason;
+
+  // Nothing was written: the redirected registration must not exist.
+  token_consensus_state state{};
+  auto new_op = registration;
+  new_op.descriptor.ticker = "NEW";
+  EXPECT_FALSE(load_token_state(db, get_or_calculate_token_id(new_op), state, reason) && state.exists);
 }
 
 TEST_F(TokenSecurity, DuplicateOperationsRejectedAtBothValidationLayers)

@@ -657,13 +657,27 @@ bool validate_tx_token_operations_against_db(
         return false;
     }
 
-      // ── Ownership verification for emission ──────────────────────────────────
-    if (op.operation_type == token_descriptor_operation_type::mint_token || op.operation_type == token_descriptor_operation_type::update_token)
+      // ── Ownership verification (register + mint + update) ────────────────────
+    // mint/update must be signed by the token's registered owner. A register
+    // must be signed by its DECLARED owner: the registration is public in the
+    // mempool and every other proof on it can be rebuilt from tx-local secrets,
+    // so without this a watcher could re-issue it verbatim (same descriptor,
+    // same derived token_id) with the initial-supply outputs redirected to
+    // themselves and win the mining race. The signature is over the tx prefix
+    // hash, which covers vout, binding the supply destinations to the owner.
+    if (op.operation_type == token_descriptor_operation_type::register_token ||
+        op.operation_type == token_descriptor_operation_type::mint_token ||
+        op.operation_type == token_descriptor_operation_type::update_token)
     {
-      if (!it->second.exists)
+      crypto::public_key expected_owner = op.descriptor.owner;
+      if (op.operation_type != token_descriptor_operation_type::register_token)
       {
-        reason = "mint_token/update_token attempted for unknown token";
-        return false;
+        if (!it->second.exists)
+        {
+          reason = "mint_token/update_token attempted for unknown token";
+          return false;
+        }
+        expected_owner = it->second.descriptor.owner;
       }
 
       bool ownership_verified = false;
@@ -673,7 +687,7 @@ bool validate_tx_token_operations_against_db(
         {
           crypto::hash prefix_hash;
           get_transaction_prefix_hash(tx, prefix_hash);
-          if (crypto::verify_schnorr_sig(rct::hash2rct(prefix_hash), rct::pk2rct(it->second.descriptor.owner), p->sig))
+          if (crypto::verify_schnorr_sig(rct::hash2rct(prefix_hash), rct::pk2rct(expected_owner), p->sig))
           {
             ownership_verified = true;
             break;
@@ -683,7 +697,7 @@ bool validate_tx_token_operations_against_db(
 
       if (!ownership_verified)
       {
-        reason = "missing or invalid token ownership proof for emission/update";
+        reason = "missing or invalid token ownership proof for registration/emission/update";
         return false;
       }
     }

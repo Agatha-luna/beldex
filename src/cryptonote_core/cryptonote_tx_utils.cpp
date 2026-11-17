@@ -1864,16 +1864,18 @@ namespace cryptonote
                   << " tx");
           }
 
-          // ── HF21: token ownership proof for mint_token ──────────────────────
-          // No token balance proof is generated: mint mints the token from
-          // nothing (no token inputs), so there is no token in==out equation.
-          // The minted amount is constrained by the amount-commitment proof
-          // above + the supply cap; the native (BDX) side that pays the fee is
-          // balanced by the standard RingCT signature (genRctSimple) below.
-          if (tx_params.tx_type == txtype::mint_token || tx_params.tx_type == txtype::update_token)
+          // ── HF21: token ownership proof (register + mint + update) ──────────
+          // Schnorr signature with the owner spend key over the tx prefix hash,
+          // verified on-chain against descriptor.owner. For mint/update it
+          // proves the owner authorized the emission/change (mint has no token
+          // in==out balance equation: the minted amount is constrained by the
+          // amount-commitment proof above + the supply cap, and the native BDX
+          // fee side is balanced by genRctSimple below). For register it binds
+          // the initial-supply outputs (covered by the prefix hash) to the
+          // DECLARED owner, so a mempool watcher cannot replay the registration
+          // with the supply redirected to their own outputs.
+          if (tx_params.tx_type == txtype::register_privacy_token || tx_params.tx_type == txtype::mint_token || tx_params.tx_type == txtype::update_token)
           {
-            // Prove the token owner authorized this emission (Schnorr over the
-            // owner's spend key, verified on-chain against descriptor.owner).
             rct::token_operation_ownership_proof ownership_proof{};
             if (!crypto::generate_schnorr_sig(rct::hash2rct(tx_prefix_hash), rct::pk2rct(sender_account_keys.m_account_address.m_spend_public_key), rct::sk2rct(sender_account_keys.m_spend_secret_key), ownership_proof.sig))
             {
@@ -1881,7 +1883,7 @@ namespace cryptonote
               return false;
             }
             tx.token_proofs.push_back(std::move(ownership_proof));
-            MINFO("Attached ownership proof for mint_token/update_token tx: " << get_transaction_hash(tx));
+            MINFO("Attached ownership proof for register/mint/update token tx: " << get_transaction_hash(tx));
           }
           } // if (!zero_secret_key)
 
