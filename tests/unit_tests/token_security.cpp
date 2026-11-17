@@ -2,11 +2,14 @@
 #include <functional>
 
 #include "gtest/gtest.h"
+#include "common/hex.h"
 #include "blockchain_db/lmdb/db_lmdb.h"
 #include "cryptonote_core/token_history_utils.h"
 #include "serialization/binary_utils.h"
 #include "serialization/string.h"
 #include "cryptonote_basic/cryptonote_format_utils.h"
+#include "cryptonote_basic/cryptonote_basic_impl.h"
+#include "cryptonote_basic/token_descriptor.h"
 #include "cryptonote_basic/token_descriptor_operation_utils.h"
 #include "ringct/rctSigs.h"
 #include "ringct/rctOps.h"
@@ -277,6 +280,82 @@ TEST_F(TokenSecurity, EmissionCannotUseBurnCommitmentExemption)
     EXPECT_FALSE(validate(tx, reason));
     EXPECT_NE(reason.find("cross-typed"), std::string::npos) << reason;
   }
+}
+
+// M7 regression (weak keys): an owner key that is not a canonical point in the
+// prime-order subgroup would make the ownership Schnorr signature forgeable
+// (identity: anyone verifies; small order / torsion: key equivocation), so
+// consensus must reject it at registration and at ownership transfer alike.
+TEST_F(TokenSecurity, WeakOrMalformedOwnerKeysRejected)
+{
+  const char* bad_keys[] = {
+    "0000000000000000000000000000000000000000000000000000000000000000", // null (also an order-4 point encoding)
+    "0100000000000000000000000000000000000000000000000000000000000000", // identity
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // order-2 point
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", // order-8 point
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", // order-8 point
+  };
+  std::string reason;
+  for (const char* hex : bad_keys)
+  {
+    SCOPED_TRACE(hex);
+
+    // Registration with a weak owner key is rejected.
+    auto reg = registration;
+    reg.descriptor.ticker = "BAD";
+    ASSERT_TRUE(tools::hex_to_type(hex, reg.descriptor.owner));
+    token_consensus_state state{};
+    EXPECT_FALSE(apply_token_operation_to_state(get_or_calculate_token_id(reg), reg, state, reason));
+    EXPECT_NE(reason.find("owner"), std::string::npos) << reason;
+
+    // ...and so is an ownership transfer to such a key.
+    auto up = registration;
+    up.operation_type = operation::update_token;
+    up.fields |= token_field_token_id;
+    up.token_id = id;
+    ASSERT_TRUE(tools::hex_to_type(hex, up.descriptor.owner));
+    token_consensus_state tstate{};
+    ASSERT_TRUE(apply_token_operation_to_state(id, registration, tstate, reason)) << reason;
+    EXPECT_FALSE(apply_token_operation_to_state(id, up, tstate, reason));
+    EXPECT_NE(reason.find("owner"), std::string::npos) << reason;
+
+  }
+}
+
+// M7 regression (typos): the JSON owner field must be a wallet address, whose
+// base58 checksum catches a mistyped owner at parse time; raw hex keys have no
+// redundancy (one wrong character silently locks the token forever), so they
+// are rejected outright.
+TEST_F(TokenSecurity, JsonOwnerMustBeAChecksummedAddress)
+{
+  account_public_address addr{};
+  addr.m_spend_public_key = registration.descriptor.owner;
+  addr.m_view_public_key = rct::rct2pk(rct::scalarmultBase(rct::d2h(5)));
+  const std::string address = get_account_address_as_str(network_type::MAINNET, false, addr);
+
+  const auto json_with_owner = [](const std::string& owner) {
+    return std::string{"{\"ticker\":\"ADDR\",\"full_name\":\"Addr token\","
+        "\"total_max_supply\":1000,\"owner\":\""} + owner + "\"}";
+  };
+
+  // A valid address parses to its spend public key.
+  token_descriptor_base d{};
+  std::string reason;
+  ASSERT_TRUE(load_token_descriptor_from_json(json_with_owner(address), d, reason)) << reason;
+  EXPECT_EQ(d.owner, registration.descriptor.owner);
+
+  // A one-character typo breaks the base58 checksum and is rejected.
+  std::string typo = address;
+  typo[typo.size() / 2] = typo[typo.size() / 2] == '3' ? '4' : '3';
+  token_descriptor_base d2{};
+  EXPECT_FALSE(load_token_descriptor_from_json(json_with_owner(typo), d2, reason));
+  EXPECT_NE(reason.find("owner"), std::string::npos) << reason;
+
+  // A raw hex key, even a valid one, is rejected: it has no checksum.
+  token_descriptor_base d3{};
+  EXPECT_FALSE(load_token_descriptor_from_json(
+      json_with_owner(tools::type_to_hex(registration.descriptor.owner)), d3, reason));
+  EXPECT_NE(reason.find("address"), std::string::npos) << reason;
 }
 
 // H1 regression: a registration seen in the mempool cannot be re-issued with

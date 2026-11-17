@@ -266,8 +266,11 @@ bool apply_token_operation_to_state(
         return reject("token ticker must not be empty");
       if (d.full_name.empty())
         return reject("token full_name must not be empty");
-      if (d.owner == crypto::null_pkey)
-        return reject("token owner must not be null");
+      {
+        std::string owner_error;
+        if (!token_owner_key_ok(d.owner, owner_error))
+          return reject("token owner key rejected: " + owner_error);
+      }
       if (d.current_supply > d.total_max_supply)
         return reject("current_supply exceeds total_max_supply");
 
@@ -331,8 +334,11 @@ bool apply_token_operation_to_state(
         return reject("update_token missing descriptor");
 
       const auto& d = op.descriptor;
-      if (d.owner == crypto::null_pkey)
-        return reject("updated token owner must not be null");
+      {
+        std::string owner_error;
+        if (!token_owner_key_ok(d.owner, owner_error))
+          return reject("updated token owner key rejected: " + owner_error);
+      }
 
       if (d.total_max_supply != state.total_max_supply)
         return reject("update_token cannot modify total_max_supply");

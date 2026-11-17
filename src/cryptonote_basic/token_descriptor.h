@@ -25,6 +25,14 @@ namespace cryptonote
     update,
   };
 
+  // A token owner key must be usable as a Schnorr verification key: a
+  // canonical ed25519 encoding of a point in the prime-order subgroup, not
+  // null and not the identity. A degenerate key (identity, small order,
+  // torsion component) would make the ownership signature forgeable, and a
+  // typo'd byte string that is not even a curve point could never sign at all,
+  // locking the token forever.
+  bool token_owner_key_ok(const crypto::public_key& owner, std::string& error);
+
   bool validate_token_descriptor_for_registration(const token_descriptor_base& descriptor, std::string& error);
   bool load_token_descriptor_from_json(std::string_view data, token_descriptor_base& descriptor, std::string& error, token_descriptor_json_mode mode = token_descriptor_json_mode::registration);
   bool load_token_descriptor_from_json_file(const fs::path& filename, token_descriptor_base& descriptor, std::string& error, token_descriptor_json_mode mode = token_descriptor_json_mode::registration);

@@ -7,7 +7,9 @@
 
 #include "common/file.h"
 #include "common/hex.h"
+#include "crypto/crypto.h"
 #include "cryptonote_basic/cryptonote_format_utils.h"
+#include "ringct/rctOps.h"
 
 namespace cryptonote
 {
@@ -31,13 +33,19 @@ namespace
         });
   }
 
+  // M7: the owner must be given as a wallet address, never as a raw hex key.
+  // The address's base58 checksum catches typos at parse time; a raw key has
+  // no redundancy, so one mistyped character would silently become an owner
+  // nobody holds and lock the token's mint/update forever. The key stored
+  // on-chain is the address's spend public key.
   bool parse_owner(std::string_view owner, crypto::public_key& out, std::string& error)
   {
     const std::string owner_str{owner};
-    address_parse_info owner_info{};
-    if (get_account_address_from_str(owner_info, network_type::MAINNET, owner_str) ||
-        get_account_address_from_str(owner_info, network_type::TESTNET, owner_str))
+    for (const network_type nettype : {network_type::MAINNET, network_type::TESTNET, network_type::DEVNET})
     {
+      address_parse_info owner_info{};
+      if (!get_account_address_from_str(owner_info, nettype, owner_str))
+        continue;
       if (owner_info.is_subaddress)
       {
         error = "owner cannot be a subaddress";
@@ -47,13 +55,35 @@ namespace
       return true;
     }
 
-    if (!tools::hex_to_type(owner_str, out))
-    {
-      error = "owner must be a hex-encoded public key or valid address";
-      return false;
-    }
-    return true;
+    error = "owner must be a wallet address (raw public keys are not accepted: the address checksum protects against typos)";
+    return false;
   }
+}
+
+bool token_owner_key_ok(const crypto::public_key& owner, std::string& error)
+{
+  if (owner == crypto::null_pkey)
+  {
+    error = "owner key must not be null";
+    return false;
+  }
+  if (!crypto::check_key(owner))
+  {
+    error = "owner key is not a canonical ed25519 point";
+    return false;
+  }
+  const rct::key k = rct::pk2rct(owner);
+  if (k == rct::identity())
+  {
+    error = "owner key must not be the identity point";
+    return false;
+  }
+  if (!rct::isInMainSubgroup(k))
+  {
+    error = "owner key is not in the prime-order subgroup";
+    return false;
+  }
+  return true;
 }
 
 bool validate_token_descriptor_for_registration(const token_descriptor_base& descriptor, std::string& error)
@@ -95,6 +125,11 @@ bool validate_token_descriptor_for_registration(const token_descriptor_base& des
     error = "meta_info cannot exceed " + std::to_string(TOKEN_META_INFO_MAX_LENGTH) + " characters";
     return false;
   }
+  // A null owner is tolerated here only because a registration JSON may omit
+  // the owner for the wallet to fill in with its own spend key; consensus
+  // (apply_token_operation_to_state) rejects a null owner outright.
+  if (descriptor.owner != crypto::null_pkey && !token_owner_key_ok(descriptor.owner, error))
+    return false;
   return true;
 }
 
