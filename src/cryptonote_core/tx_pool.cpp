@@ -2041,10 +2041,17 @@ end:
         continue;
       }
 
+      // burn_token is deliberately NOT part of the per-token block slot (M9):
+      // a burn only moves current_supply, which no other operation reads from
+      // its own descriptor any more (an update's restated supply is ignored),
+      // so burns compose safely with any same-token operation in one block.
+      // Counting them would let any dust-holder outbid the owner's mint or
+      // update for the token's slot every block. Mirrors the pool-admission
+      // dedup, which likewise excludes burns.
       const bool is_token_tx =
           version >= feature::PRIVACY_TOKENS &&
           (is_token_registration || tx.type == txtype::mint_token ||
-           tx.type == txtype::update_token || tx.type == txtype::burn_token);
+           tx.type == txtype::update_token);
 
       if (is_token_tx)
       {

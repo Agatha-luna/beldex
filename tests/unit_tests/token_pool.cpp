@@ -136,7 +136,7 @@ protected:
   }
 };
 
-TEST_F(TokenPool, EverySameTokenPairConflictsIncludingReorgRestores)
+TEST_F(TokenPool, SameTokenPairsConflictExceptBurnsIncludingReorgRestores)
 {
   for (size_t first = 0; first < 4; ++first)
     for (size_t second = 0; second < 4; ++second)
@@ -145,15 +145,30 @@ TEST_F(TokenPool, EverySameTokenPairConflictsIncludingReorgRestores)
       auto a = insert(tx(first, 1, 1), 1);
       auto b = insert(tx(second, 1, 2), 2);
       auto other = insert(tx(second, 2, 3), 3);
+      // M9: a burn never occupies the token's per-block slot -- it only moves
+      // current_supply, which no other operation reads from its own descriptor
+      // -- so any pair involving a burn coexists in one template. Otherwise a
+      // dust-holder's burns could outbid the owner's mint/update every block.
+      const bool has_burn = first == 3 || second == 3;
       for (size_t attempt = 0; attempt < 2; ++attempt)
       {
         auto result = block_template();
-        ASSERT_EQ(result.tx_hashes.size(), 2);
-        EXPECT_EQ(std::count(result.tx_hashes.begin(), result.tx_hashes.end(), other), 1);
-        EXPECT_EQ(std::count(result.tx_hashes.begin(), result.tx_hashes.end(), a) +
-                  std::count(result.tx_hashes.begin(), result.tx_hashes.end(), b), 1);
+        if (has_burn)
+        {
+          ASSERT_EQ(result.tx_hashes.size(), 3);
+          EXPECT_EQ(std::count(result.tx_hashes.begin(), result.tx_hashes.end(), a), 1);
+          EXPECT_EQ(std::count(result.tx_hashes.begin(), result.tx_hashes.end(), b), 1);
+          EXPECT_EQ(std::count(result.tx_hashes.begin(), result.tx_hashes.end(), other), 1);
+        }
+        else
+        {
+          ASSERT_EQ(result.tx_hashes.size(), 2);
+          EXPECT_EQ(std::count(result.tx_hashes.begin(), result.tx_hashes.end(), other), 1);
+          EXPECT_EQ(std::count(result.tx_hashes.begin(), result.tx_hashes.end(), a) +
+                    std::count(result.tx_hashes.begin(), result.tx_hashes.end(), b), 1);
+        }
       }
-      // Template selection skips the loser; it must not mutate pool contents.
+      // Template selection skips any loser; it must not mutate pool contents.
       EXPECT_EQ(pool.get_transactions_count(), 3);
       clear();
     }

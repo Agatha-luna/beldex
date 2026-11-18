@@ -183,6 +183,46 @@ TEST_F(TokenSecurity, BurnCannotUseNativeInputsToReduceTokenSupply)
   EXPECT_EQ(state.current_supply, 100);
 }
 
+// M9 regression: a pending update must not be invalidated by a third party's
+// burn landing first. current_supply is chain-owned: the update's descriptor
+// copy is ignored, never compared, and can never change the chain value.
+TEST_F(TokenSecurity, BurnCannotInvalidatePendingUpdateAndSupplyIsChainOwned)
+{
+  token_consensus_state state{};
+  std::string reason;
+  ASSERT_TRUE(apply_token_operation_to_state(id, registration, state, reason)) << reason;
+
+  // The owner builds an update restating the supply as it was at build time (100)...
+  auto update = registration;
+  update.operation_type = operation::update_token;
+  update.fields |= token_field_token_id;
+  update.token_id = id;
+  update.descriptor.meta_info = "new meta";
+
+  // ...then any holder's dust burn lands first and moves the supply.
+  tx_extra_token_descriptor_operation burn{};
+  burn.operation_type = operation::burn_token;
+  burn.fields = token_field_token_id | token_field_amount;
+  burn.token_id = id;
+  burn.amount = 40;
+  ASSERT_TRUE(apply_token_operation_to_state(id, burn, state, reason)) << reason;
+  EXPECT_EQ(state.current_supply, 60);
+
+  // The now-stale update still applies, and the supply keeps the chain value.
+  ASSERT_TRUE(apply_token_operation_to_state(id, update, state, reason)) << reason;
+  EXPECT_EQ(state.current_supply, 60);
+  EXPECT_EQ(state.descriptor.current_supply, 60);
+  EXPECT_EQ(state.descriptor.meta_info, "new meta");
+
+  // Nor can an update smuggle a supply change in through its descriptor copy.
+  auto inflate = update;
+  inflate.descriptor.meta_info = "inflate";
+  inflate.descriptor.current_supply = 1000;
+  ASSERT_TRUE(apply_token_operation_to_state(id, inflate, state, reason)) << reason;
+  EXPECT_EQ(state.current_supply, 60);
+  EXPECT_EQ(state.descriptor.current_supply, 60);
+}
+
 // The id function itself decides, by operation type, where an id comes from:
 // a register can never choose its own id, and the other operations must name
 // their token explicitly rather than have it re-derived from a descriptor.
