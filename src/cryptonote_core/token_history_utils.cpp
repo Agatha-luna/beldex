@@ -187,6 +187,15 @@ bool validate_token_descriptor_operation(const tx_extra_token_descriptor_operati
     return false;
   }
 
+  // Each operation must carry the fields it needs and nothing else. A field an
+  // operation does not use is never validated (e.g. a descriptor inside a mint
+  // or burn, which apply_token_operation_to_state ignores), yet it is stored on
+  // chain and served by RPC as if it described the token.
+  auto carries_only = [&op](uint8_t allowed) {
+    return (op.fields & static_cast<uint8_t>(~allowed)) == 0;
+  };
+  constexpr const char* unused_field = "token descriptor operation sets a field its operation type does not use";
+
   switch (op.operation_type)
   {
     case token_descriptor_operation_type::register_token:
@@ -200,6 +209,11 @@ bool validate_token_descriptor_operation(const tx_extra_token_descriptor_operati
         reason = "register_token must not carry an explicit token_id; it is derived from the descriptor";
         return false;
       }
+      if (!carries_only(token_field_descriptor | token_field_token_id_salt | token_field_amount_commitment))
+      {
+        reason = unused_field;
+        return false;
+      }
       break;
 
     case token_descriptor_operation_type::mint_token:
@@ -209,12 +223,22 @@ bool validate_token_descriptor_operation(const tx_extra_token_descriptor_operati
         reason = "token mint/burn operation requires non-zero amount";
         return false;
       }
+      if (!carries_only(token_field_token_id | token_field_amount | token_field_amount_commitment))
+      {
+        reason = unused_field;
+        return false;
+      }
       break;
 
     case token_descriptor_operation_type::update_token:
       if (!op.field_is_set(token_field_descriptor))
       {
         reason = "update_token operation requires descriptor field";
+        return false;
+      }
+      if (!carries_only(token_field_descriptor | token_field_token_id))
+      {
+        reason = unused_field;
         return false;
       }
       break;
@@ -284,7 +308,6 @@ bool apply_token_operation_to_state(
       state.descriptor = d;
       state.current_supply = d.current_supply;
       state.total_max_supply = d.total_max_supply;
-      state.total_minted = d.current_supply; // the initial supply counts as issued
       return true;
     }
 
@@ -294,21 +317,13 @@ bool apply_token_operation_to_state(
         return reject("mint_token for unknown token");
       if (!op.field_is_set(token_field_amount))
         return reject("mint_token missing amount");
-      // The cap applies to cumulative issuance (total_minted), not to the
-      // circulating supply: burned tokens do not reopen mint headroom, so the
-      // owner can only ever mint total_max_supply - total_minted more.
-      if (state.total_minted > std::numeric_limits<uint64_t>::max() - op.amount)
-        return reject("mint_token supply overflow");
-      const uint64_t new_total_minted = state.total_minted + op.amount;
-      if (new_total_minted > state.total_max_supply)
-        return reject("mint_token exceeds max supply (burned tokens do not restore mint headroom)");
-      // current_supply <= total_minted always holds, so this cannot overflow;
-      // checked anyway so a corrupt row can never wrap the supply.
       if (state.current_supply > std::numeric_limits<uint64_t>::max() - op.amount)
         return reject("mint_token supply overflow");
-      state.total_minted = new_total_minted;
-      state.current_supply += op.amount;
-      state.descriptor.current_supply = state.current_supply;
+      const uint64_t new_supply = state.current_supply + op.amount;
+      if (new_supply > state.total_max_supply)
+        return reject("mint_token exceeds max supply");
+      state.current_supply = new_supply;
+      state.descriptor.current_supply = new_supply;
       return true;
     }
 
@@ -320,7 +335,6 @@ bool apply_token_operation_to_state(
         return reject("burn_token missing amount");
       if (state.current_supply < op.amount)
         return reject("burn_token exceeds current supply");
-      // total_minted is deliberately left untouched: a burn is permanent.
       state.current_supply -= op.amount;
       state.descriptor.current_supply = state.current_supply;
       return true;
@@ -481,6 +495,38 @@ bool rewind_tokens_for_height(BlockchainDB& db, uint64_t height, std::string* re
   }
 
   db.del_token_undo(height);
+  return true;
+}
+
+bool pop_block_and_rewind_tokens(BlockchainDB& db, block& blk, std::vector<transaction>& txs, std::string* reason)
+{
+  if (db.height() == 0)
+  {
+    set_reason(reason, "cannot pop a block from an empty blockchain");
+    return false;
+  }
+  const uint64_t height = db.height() - 1;
+  db.pop_block(blk, txs);
+  return rewind_tokens_for_height(db, height, reason);
+}
+
+bool check_block_token_op_exclusivity(const transaction& tx, std::unordered_set<crypto::token_id>& seen, std::string& reason)
+{
+  if (tx.type != txtype::register_privacy_token && tx.type != txtype::mint_token &&
+      tx.type != txtype::update_token)
+    return true;
+
+  size_t op_index = 0;
+  tx_extra_token_descriptor_operation op{};
+  while (get_token_descriptor_operation_from_tx_extra(tx.extra, op, op_index++))
+  {
+    const crypto::token_id token_id = get_or_calculate_token_id(op);
+    if (!seen.insert(token_id).second)
+    {
+      reason = "block contains more than one register/mint/update operation on the same token";
+      return false;
+    }
+  }
   return true;
 }
 

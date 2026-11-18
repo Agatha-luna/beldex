@@ -1,6 +1,7 @@
 #include "token_descriptor.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 
 #include <rapidjson/document.h>
@@ -31,6 +32,37 @@ namespace
         std::all_of(full_name.begin(), full_name.end(), [](unsigned char c) {
           return ascii_alnum(c) || c == ' ' || c == '_' || c == '-' || c == '.';
         });
+  }
+
+  // Strict UTF-8 (RFC 3629): well-formed sequences only, no overlong forms, no
+  // UTF-16 surrogates and nothing above U+10FFFF.
+  bool valid_utf8(std::string_view s)
+  {
+    size_t i = 0;
+    while (i < s.size())
+    {
+      const unsigned char c = static_cast<unsigned char>(s[i]);
+      if (c < 0x80) { ++i; continue; }
+      size_t len;
+      uint32_t cp;
+      if      ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1F; }
+      else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+      else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+      else return false;
+      if (s.size() - i < len) return false;
+      for (size_t k = 1; k < len; ++k)
+      {
+        const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+        if ((cc & 0xC0) != 0x80) return false;
+        cp = (cp << 6) | (cc & 0x3F);
+      }
+      if ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000))
+        return false;
+      if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+        return false;
+      i += len;
+    }
+    return true;
   }
 
   // M7: the owner must be given as a wallet address, never as a raw hex key.
@@ -130,6 +162,12 @@ bool validate_token_descriptor_for_registration(const token_descriptor_base& des
   // (apply_token_operation_to_state) rejects a null owner outright.
   if (descriptor.owner != crypto::null_pkey && !token_owner_key_ok(descriptor.owner, error))
     return false;
+
+  if (!valid_utf8(descriptor.meta_info))
+  {
+    error = "meta_info must be valid UTF-8 text";
+    return false;
+  }
   return true;
 }
 

@@ -1899,6 +1899,17 @@ namespace rct {
                         std::string& reason)
     {
       try {
+        // A tx with token outputs may have at most
+        // TX_BULLETPROOF_PLUS_MAX_OUTPUTS outputs in total, native and token
+        // together. This also keeps the aggregated token range proof within
+        // what the Bulletproof+ verifier supports.
+        if (tx.has_zyphora_outputs() && tx.vout.size() > cryptonote::TX_BULLETPROOF_PLUS_MAX_OUTPUTS)
+        {
+            reason = "too many outputs in a privacy-token tx (" + std::to_string(tx.vout.size()) + ", maximum "
+                   + std::to_string(cryptonote::TX_BULLETPROOF_PLUS_MAX_OUTPUTS) + " native and token together)";
+            return false;
+        }
+
         // ── 0. Prevalidate the proof set is well-formed ──────────────────────
         // token_proofs is a self-describing serialized vector, so serialization
         // constrains neither WHICH proofs appear nor how many. Reject duplicates
@@ -1907,17 +1918,34 @@ namespace rct {
         // extra/duplicate entries, and since token_proofs are part of the
         // prunable hash that yields a verifying-but-bloated variant tx. Mirrors
         // Zano's per-type count_type_in_variant_container prevalidation.
+        //
+        // Nothing signs the token_proofs vector itself, so every degree of
+        // freedom in its encoding would let a relay change the tx hash without
+        // invalidating any proof. Pin it to exactly one layout: proofs must
+        // appear in the canonical order construct_tx_with_tx_key emits them
+        // (surjection, balance, range, amount-commitment, ownership), each at
+        // most once, with no unused entries.
         {
             size_t n_surjection = 0, n_balance = 0, n_range = 0,
                    n_token_op = 0, n_ownership = 0;
+            int last_rank = -1;
             for (const auto& proof : tx.token_proofs)
             {
-                if      (std::holds_alternative<rct::zy_token_surjection_proof>(proof))       ++n_surjection;
-                else if (std::holds_alternative<rct::zy_balance_proof>(proof))                ++n_balance;
-                else if (std::holds_alternative<rct::zy_outs_range_proof>(proof))             ++n_range;
-                else if (std::holds_alternative<rct::token_operation_proof>(proof))           ++n_token_op;
-                else if (std::holds_alternative<rct::token_operation_ownership_proof>(proof)) ++n_ownership;
+                int rank;
+                if      (std::holds_alternative<rct::zy_token_surjection_proof>(proof))       { ++n_surjection; rank = 0; }
+                else if (std::holds_alternative<rct::zy_balance_proof>(proof))                { ++n_balance;    rank = 1; }
+                else if (std::holds_alternative<rct::zy_outs_range_proof>(proof))             { ++n_range;      rank = 2; }
+                else if (const auto* aop = std::get_if<rct::token_operation_proof>(&proof))
+                {
+                    ++n_token_op; rank = 3;
+                    if (aop->flags != 1) { reason = "token_operation_proof has invalid flags"; return false; }
+                }
+                else if (std::holds_alternative<rct::token_operation_ownership_proof>(proof)) { ++n_ownership;  rank = 4; }
                 else { reason = "unknown token proof type"; return false; }
+
+                // Strictly increasing rank also rejects duplicates.
+                if (rank <= last_rank) { reason = "token_proofs not in canonical order"; return false; }
+                last_rank = rank;
             }
             // ZY_sigs live under the tx's signatures (tx.zy_sig), not token_proofs.
             const size_t n_zy_sig = tx.zy_sig.size();
@@ -1938,6 +1966,15 @@ namespace rct {
             {
                 reason = "ZY_sig count (" + std::to_string(n_zy_sig)
                        + ") != confidential input count (" + std::to_string(zy_input_count) + ")";
+                return false;
+            }
+
+            // The balance proof is only checked when there are zyphora inputs
+            // (step 4); without them it would be an unverified, removable
+            // entry, so it must not be present at all.
+            if (n_balance != 0 && zy_input_count == 0)
+            {
+                reason = "zy_balance_proof present without zyphora inputs";
                 return false;
             }
 
@@ -2191,7 +2228,7 @@ namespace rct {
         }
 
         // ── 3. Verify ownership proof for token operations ────────────────────
-        // For deploy/mint/burn, verify the Schnorr signature against descriptor.owner.
+        // For deploy/mint/update, the Schnorr signature is checked against descriptor.owner.
         for (const auto& proof : tx.token_proofs)
         {
             if (const auto* op = std::get_if<rct::token_operation_ownership_proof>(&proof))

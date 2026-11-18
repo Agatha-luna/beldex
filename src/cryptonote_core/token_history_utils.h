@@ -3,6 +3,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "blockchain_db/blockchain_db.h"
@@ -19,11 +20,6 @@ struct token_consensus_state
   token_descriptor_base descriptor{};
   uint64_t current_supply = 0;
   uint64_t total_max_supply = 0;
-  // Cumulative amount ever issued (initial supply + every mint). Never
-  // decreases: a burn lowers current_supply but does NOT give mint headroom
-  // back, so the owner can only ever mint total_max_supply - total_minted.
-  // Consensus-critical (checked on every mint_token).
-  uint64_t total_minted = 0;
   // Number of operations applied to this token so far.
   uint64_t op_count = 0;
   // Rolling hash chaining every applied operation, for integrity/debugging.
@@ -36,7 +32,6 @@ struct token_consensus_state
     FIELD(total_max_supply)
     FIELD(op_count)
     FIELD(last_op_hash)
-    FIELD(total_minted)
   END_SERIALIZE()
 };
 
@@ -47,6 +42,8 @@ bool validate_token_transaction_fees(const transaction& tx, hf hf_version, netwo
 bool load_token_state(BlockchainDB& db, const crypto::token_id& token_id, token_consensus_state& state, std::string& reason);
 bool apply_tokens_from_block(BlockchainDB& db, uint64_t height, const std::vector<transaction>& txs, std::string* reason = nullptr);
 bool rewind_tokens_for_height(BlockchainDB& db, uint64_t height, std::string* reason = nullptr);
+bool pop_block_and_rewind_tokens(BlockchainDB& db, block& blk, std::vector<transaction>& txs, std::string* reason = nullptr);
+bool check_block_token_op_exclusivity(const transaction& tx, std::unordered_set<crypto::token_id>& seen, std::string& reason);
 // hf_version gates the HF22 fan-out rule (a register with non-zero supply must
 // produce >= MIN_TOKEN_MINT_OUTPUTS tx_out_zyphora outputs; mint is exempt).
 bool validate_tx_token_operations_against_db(BlockchainDB& db, const transaction& tx,
