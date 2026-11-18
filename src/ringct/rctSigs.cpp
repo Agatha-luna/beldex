@@ -1998,7 +1998,7 @@ namespace rct {
             }
             if (n_ownership != 0 && !ownership_allowed)
             {
-                reason = "token_operation_ownership_proof present on a tx that is not deploy/mint/update";
+                reason = "token_operation_ownership_proof present on a tx that is not register/mint/update";
                 return false;
             }
 

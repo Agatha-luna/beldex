@@ -290,8 +290,11 @@ bool apply_token_operation_to_state(
         return reject("token ticker must not be empty");
       if (d.full_name.empty())
         return reject("token full_name must not be empty");
-      if (d.owner == crypto::null_pkey)
-        return reject("token owner must not be null");
+      {
+        std::string owner_error;
+        if (!token_owner_key_ok(d.owner, owner_error))
+          return reject("token owner key rejected: " + owner_error);
+      }
       if (d.current_supply > d.total_max_supply)
         return reject("current_supply exceeds total_max_supply");
 
@@ -345,8 +348,11 @@ bool apply_token_operation_to_state(
         return reject("update_token missing descriptor");
 
       const auto& d = op.descriptor;
-      if (d.owner == crypto::null_pkey)
-        return reject("updated token owner must not be null");
+      {
+        std::string owner_error;
+        if (!token_owner_key_ok(d.owner, owner_error))
+          return reject("updated token owner key rejected: " + owner_error);
+      }
 
       if (d.total_max_supply != state.total_max_supply)
         return reject("update_token cannot modify total_max_supply");
@@ -703,22 +709,28 @@ bool validate_tx_token_operations_against_db(
         return false;
     }
 
-    // ── Ownership verification (register + mint + update) ────────────────────
-    // The owner signs the tx prefix hash, which covers the outputs and the
-    // descriptor. For mint/update the key is the owner on record. For register
-    // it is the owner named in the descriptor: the descriptor and salt are
-    // public as soon as the tx is broadcast, so without this signature anyone
-    // could re-register the same token id with the initial supply paid to
-    // themselves.
-    const bool is_register = op.operation_type == token_descriptor_operation_type::register_token;
-    if (is_register || op.operation_type == token_descriptor_operation_type::mint_token || op.operation_type == token_descriptor_operation_type::update_token)
+      // ── Ownership verification (register + mint + update) ────────────────────
+    // mint/update must be signed by the token's registered owner. A register
+    // must be signed by its DECLARED owner: the registration is public in the
+    // mempool and every other proof on it can be rebuilt from tx-local secrets,
+    // so without this a watcher could re-issue it verbatim (same descriptor,
+    // same derived token_id) with the initial-supply outputs redirected to
+    // themselves and win the mining race. The signature is over the tx prefix
+    // hash, which covers vout, binding the supply destinations to the owner.
+    if (op.operation_type == token_descriptor_operation_type::register_token ||
+        op.operation_type == token_descriptor_operation_type::mint_token ||
+        op.operation_type == token_descriptor_operation_type::update_token)
     {
-      if (!is_register && !it->second.exists)
+      crypto::public_key expected_owner = op.descriptor.owner;
+      if (op.operation_type != token_descriptor_operation_type::register_token)
       {
-        reason = "mint_token/update_token attempted for unknown token";
-        return false;
+        if (!it->second.exists)
+        {
+          reason = "mint_token/update_token attempted for unknown token";
+          return false;
+        }
+        expected_owner = it->second.descriptor.owner;
       }
-      const crypto::public_key& owner = is_register ? op.descriptor.owner : it->second.descriptor.owner;
 
       bool ownership_verified = false;
       for (const auto& proof : tx.token_proofs)
@@ -727,7 +739,7 @@ bool validate_tx_token_operations_against_db(
         {
           crypto::hash prefix_hash;
           get_transaction_prefix_hash(tx, prefix_hash);
-          if (crypto::verify_schnorr_sig(rct::hash2rct(prefix_hash), rct::pk2rct(owner), p->sig))
+          if (crypto::verify_schnorr_sig(rct::hash2rct(prefix_hash), rct::pk2rct(expected_owner), p->sig))
           {
             ownership_verified = true;
             break;
@@ -737,8 +749,7 @@ bool validate_tx_token_operations_against_db(
 
       if (!ownership_verified)
       {
-        reason = is_register ? "missing or invalid token ownership proof for registration"
-                             : "missing or invalid token ownership proof for emission/update";
+        reason = "missing or invalid token ownership proof for registration/emission/update";
         return false;
       }
     }

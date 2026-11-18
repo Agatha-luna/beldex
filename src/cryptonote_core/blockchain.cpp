@@ -3452,9 +3452,13 @@ bool Blockchain::check_tx_outputs(const transaction& tx, tx_verification_context
 
     if(tx.type == txtype::register_privacy_token)
     {
-      // Initial registration of a new token requires an amount-commitment proof binding the declared total supply to the output commitments,
-      // and an ownership signature from the owner named in the descriptor, so that nobody else can register the same token id first.
-      // Again, the cryptographic verification of both happens in validate_tx_token_operations_against_db();
+      // Initial registration of a new token requires an amount-commitment proof
+      // binding the declared total supply to the output commitments, and an
+      // ownership signature by the DECLARED owner over the tx prefix hash. The
+      // prefix hash covers vout, so a mempool watcher cannot rebroadcast a
+      // copied registration with the initial supply redirected to their own
+      // outputs. Again, the cryptographic verification of both happens in
+      // validate_tx_token_operations_against_db();
       // here we only do a cheap structural presence check for early rejection.
       bool has_amount_commitment = false;
       bool has_ownership         = false;

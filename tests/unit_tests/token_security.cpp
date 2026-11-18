@@ -1,11 +1,16 @@
 // Copyright (c) 2026, The Beldex Project
+#include <functional>
+
 #include "gtest/gtest.h"
+#include "common/hex.h"
 #include <algorithm>
 #include "blockchain_db/lmdb/db_lmdb.h"
 #include "cryptonote_core/token_history_utils.h"
 #include "serialization/binary_utils.h"
 #include "serialization/string.h"
 #include "cryptonote_basic/cryptonote_format_utils.h"
+#include "cryptonote_basic/cryptonote_basic_impl.h"
+#include "cryptonote_basic/token_descriptor.h"
 #include "cryptonote_basic/token_descriptor_operation_utils.h"
 #include "cryptonote_basic/token_descriptor.h"
 #include "ringct/rctSigs.h"
@@ -57,7 +62,9 @@ protected:
   // These are valid inputs to the token-state validator, not fully signed
   // spend transactions. Ring signatures/range proofs are tested separately.
   transaction make_tx(size_t kind, bool duplicate = false, bool zy_input = true,
-                      bool wrong_output_commitment = false)
+                      bool wrong_output_commitment = false,
+                      const std::function<void(transaction&)>& mutate_before_proofs = {},
+                      const rct::key* ownership_secret = nullptr)
   {
     transaction tx{};
     tx.version = txversion::v4_tx_types;
@@ -105,6 +112,8 @@ protected:
         (duplicate && !add_token_descriptor_operation_to_tx_extra(tx.extra, op)))
       throw std::runtime_error("Cannot encode test operation");
     tx.output_unlock_times.resize(tx.vout.size());
+    if (mutate_before_proofs)
+      mutate_before_proofs(tx);
     crypto::hash prefix;
     get_transaction_prefix_hash(tx, prefix);
     const auto msg = rct::hash2rct(prefix);
@@ -117,10 +126,11 @@ protected:
         throw std::runtime_error("Cannot generate composition proof");
       tx.token_proofs.emplace_back(proof);
     }
-    if (kind != 3) // register, mint and update are signed by the owner
+    if (kind == 0 || kind == 1 || kind == 2)
     {
+      const rct::key& secret = ownership_secret ? *ownership_secret : owner_secret;
       rct::token_operation_ownership_proof proof{};
-      if (!crypto::generate_schnorr_sig(msg, rct::pk2rct(registration.descriptor.owner), owner_secret, proof.sig))
+      if (!crypto::generate_schnorr_sig(msg, rct::scalarmultBase(secret), secret, proof.sig))
         throw std::runtime_error("Cannot generate ownership proof");
       tx.token_proofs.emplace_back(proof);
     }
@@ -280,6 +290,135 @@ TEST_F(TokenSecurity, EmissionCannotUseBurnCommitmentExemption)
     EXPECT_FALSE(validate(tx, reason));
     EXPECT_NE(reason.find("cross-typed"), std::string::npos) << reason;
   }
+}
+
+// M7 regression (weak keys): an owner key that is not a canonical point in the
+// prime-order subgroup would make the ownership Schnorr signature forgeable
+// (identity: anyone verifies; small order / torsion: key equivocation), so
+// consensus must reject it at registration and at ownership transfer alike.
+TEST_F(TokenSecurity, WeakOrMalformedOwnerKeysRejected)
+{
+  const char* bad_keys[] = {
+    "0000000000000000000000000000000000000000000000000000000000000000", // null (also an order-4 point encoding)
+    "0100000000000000000000000000000000000000000000000000000000000000", // identity
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // order-2 point
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", // order-8 point
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", // order-8 point
+  };
+  std::string reason;
+  for (const char* hex : bad_keys)
+  {
+    SCOPED_TRACE(hex);
+
+    // Registration with a weak owner key is rejected.
+    auto reg = registration;
+    reg.descriptor.ticker = "BAD";
+    ASSERT_TRUE(tools::hex_to_type(hex, reg.descriptor.owner));
+    token_consensus_state state{};
+    EXPECT_FALSE(apply_token_operation_to_state(get_or_calculate_token_id(reg), reg, state, reason));
+    EXPECT_NE(reason.find("owner"), std::string::npos) << reason;
+
+    // ...and so is an ownership transfer to such a key.
+    auto up = registration;
+    up.operation_type = operation::update_token;
+    up.fields |= token_field_token_id;
+    up.token_id = id;
+    ASSERT_TRUE(tools::hex_to_type(hex, up.descriptor.owner));
+    token_consensus_state tstate{};
+    ASSERT_TRUE(apply_token_operation_to_state(id, registration, tstate, reason)) << reason;
+    EXPECT_FALSE(apply_token_operation_to_state(id, up, tstate, reason));
+    EXPECT_NE(reason.find("owner"), std::string::npos) << reason;
+
+  }
+}
+
+// M7 regression (typos): the JSON owner field must be a wallet address, whose
+// base58 checksum catches a mistyped owner at parse time; raw hex keys have no
+// redundancy (one wrong character silently locks the token forever), so they
+// are rejected outright.
+TEST_F(TokenSecurity, JsonOwnerMustBeAChecksummedAddress)
+{
+  account_public_address addr{};
+  addr.m_spend_public_key = registration.descriptor.owner;
+  addr.m_view_public_key = rct::rct2pk(rct::scalarmultBase(rct::d2h(5)));
+  const std::string address = get_account_address_as_str(network_type::MAINNET, false, addr);
+
+  const auto json_with_owner = [](const std::string& owner) {
+    return std::string{"{\"ticker\":\"ADDR\",\"full_name\":\"Addr token\","
+        "\"total_max_supply\":1000,\"owner\":\""} + owner + "\"}";
+  };
+
+  // A valid address parses to its spend public key.
+  token_descriptor_base d{};
+  std::string reason;
+  ASSERT_TRUE(load_token_descriptor_from_json(json_with_owner(address), d, reason)) << reason;
+  EXPECT_EQ(d.owner, registration.descriptor.owner);
+
+  // A one-character typo breaks the base58 checksum and is rejected.
+  std::string typo = address;
+  typo[typo.size() / 2] = typo[typo.size() / 2] == '3' ? '4' : '3';
+  token_descriptor_base d2{};
+  EXPECT_FALSE(load_token_descriptor_from_json(json_with_owner(typo), d2, reason));
+  EXPECT_NE(reason.find("owner"), std::string::npos) << reason;
+
+  // A raw hex key, even a valid one, is rejected: it has no checksum.
+  token_descriptor_base d3{};
+  EXPECT_FALSE(load_token_descriptor_from_json(
+      json_with_owner(tools::type_to_hex(registration.descriptor.owner)), d3, reason));
+  EXPECT_NE(reason.find("address"), std::string::npos) << reason;
+}
+
+// H1 regression: a registration seen in the mempool cannot be re-issued with
+// the initial supply redirected. Every other proof on a register tx can be
+// rebuilt from tx-local secrets, so the ownership signature by the DECLARED
+// owner over the tx prefix hash (which covers vout) is what binds the supply
+// destinations to the owner.
+TEST_F(TokenSecurity, RegistrationCannotBeFrontRunToRedirectSupply)
+{
+  std::string reason;
+  const auto victim = make_tx(0);
+  ASSERT_TRUE(validate(victim, reason)) << reason;
+
+  // Missing ownership proof: rejected.
+  auto unsigned_reg = victim;
+  unsigned_reg.token_proofs.erase(
+      std::remove_if(unsigned_reg.token_proofs.begin(), unsigned_reg.token_proofs.end(),
+                     [](const auto& p) {
+                       return std::holds_alternative<rct::token_operation_ownership_proof>(p);
+                     }),
+      unsigned_reg.token_proofs.end());
+  EXPECT_FALSE(validate(unsigned_reg, reason));
+  EXPECT_NE(reason.find("ownership"), std::string::npos) << reason;
+
+  // Signed by a key other than the declared owner: rejected.
+  const rct::key attacker_secret = rct::d2h(99);
+  auto wrong_key = make_tx(0, false, true, false, {}, &attacker_secret);
+  EXPECT_FALSE(validate(wrong_key, reason));
+  EXPECT_NE(reason.find("ownership"), std::string::npos) << reason;
+
+  // The full front-run: the attacker rebuilds the registration with the same
+  // descriptor but the supply sent to their own stealth addresses, regenerates
+  // every tx-local proof (which they can), and transplants the victim's
+  // ownership signature, which no longer matches the rebuilt prefix hash.
+  const auto redirect_supply = [&attacker_secret](transaction& tx) {
+    for (auto& out : tx.vout)
+      if (auto* zy = std::get_if<tx_out_zyphora>(&out.target))
+        zy->stealth_address = rct::rct2pk(rct::scalarmultBase(attacker_secret));
+  };
+  auto front_run = make_tx(0, false, true, false, redirect_supply, &attacker_secret);
+  for (auto& p : front_run.token_proofs)
+    if (auto* mine = std::get_if<rct::token_operation_ownership_proof>(&p))
+      for (const auto& vp : victim.token_proofs)
+        if (const auto* theirs = std::get_if<rct::token_operation_ownership_proof>(&vp))
+          *mine = *theirs;
+  EXPECT_FALSE(validate(front_run, reason));
+  EXPECT_NE(reason.find("ownership"), std::string::npos) << reason;
+
+  // Nothing was written: the redirected registration must not exist.
+  token_consensus_state state{};
+  auto new_op = registration;
+  new_op.descriptor.ticker = "NEW";
+  EXPECT_FALSE(load_token_state(db, get_or_calculate_token_id(new_op), state, reason) && state.exists);
 }
 
 TEST_F(TokenSecurity, DuplicateOperationsRejectedAtBothValidationLayers)
@@ -587,6 +726,8 @@ TEST_F(TokenSecurity, OperationsCarryOnlyTheirOwnFields)
     op.amount = 1;
     check(op);
   }
+}
+
 // A tx with token outputs may have at most TX_BULLETPROOF_PLUS_MAX_OUTPUTS
 // outputs in total, native and token together.
 TEST(TokenOutputLimit, TooManyOutputsRejectedBeforeAnyProofIsRead)
