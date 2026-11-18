@@ -91,7 +91,7 @@ protected:
   }
   // `verified` models whether the tx passed its input check when it entered
   // the pool; a tx delivered inside a block is stored even when it did not.
-  crypto::hash insert(transaction tx, uint64_t received, bool verified = true)
+  crypto::hash insert(transaction tx, uint64_t received, bool verified = true, bool kept_by_block = true)
   {
     const auto id = get_transaction_hash(tx);
     txpool_tx_meta_t meta{};
@@ -99,8 +99,8 @@ protected:
     meta.weight = 1000;
     meta.receive_time = received;
     meta.relayed = true;
-    // Model transactions restored after a detach; admission dedup is bypassed.
-    meta.kept_by_block = true;
+    // Default models transactions restored after a detach; admission dedup is bypassed.
+    meta.kept_by_block = kept_by_block;
     if (verified)
     {
       meta.max_used_block_height = 0;
@@ -135,6 +135,33 @@ protected:
     ASSERT_TRUE(pool.init(0));
   }
 };
+
+// M10 regression: a pooled token operation that the new block has invalidated
+// must be evicted at that block, releasing the token's pending slot, instead
+// of squatting it for MEMPOOL_TX_LIVETIME (3 days). kept_by_block txs are
+// exempt: they may belong to an alt chain the node could still reorg onto.
+// (The fixture's proof-less ops fail re-validation, standing in for ops that
+// a mined block made permanently stale.)
+TEST_F(TokenPool, StaleTokenOpsAreEvictedOnNewBlockReleasingTheSlot)
+{
+  const auto stale = insert(tx(1, 1, 1), 1, /*verified=*/true, /*kept_by_block=*/false);
+  const auto alt   = insert(tx(1, 2, 2), 2, /*verified=*/true, /*kept_by_block=*/true);
+  ASSERT_EQ(pool.get_transactions_count(), 2);
+  // Both tokens' slots are held before the block arrives.
+  EXPECT_TRUE(tx_pool_test_access::duplicate(pool, tx(2, 1, 3)));
+  EXPECT_TRUE(tx_pool_test_access::duplicate(pool, tx(2, 2, 3)));
+
+  block blk{};
+  blk.major_version = feature::PRIVACY_TOKENS;
+  blk.miner_tx.vin.emplace_back(txin_gen{101});
+  ASSERT_TRUE(pool.on_blockchain_inc(blk));
+
+  // The relayed stale op is gone and token 1's slot is free again...
+  EXPECT_EQ(pool.get_transactions_count(), 1);
+  EXPECT_FALSE(tx_pool_test_access::duplicate(pool, tx(2, 1, 3)));
+  // ...while the kept_by_block op survives and token 2's slot stays held.
+  EXPECT_TRUE(tx_pool_test_access::duplicate(pool, tx(2, 2, 3)));
+}
 
 TEST_F(TokenPool, SameTokenPairsConflictExceptBurnsIncludingReorgRestores)
 {
