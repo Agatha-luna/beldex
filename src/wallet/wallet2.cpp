@@ -10457,6 +10457,16 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
       {
         // Sanity-check each bucket independently. The per-bucket distributions are filtered, so
         // their counts cannot be compared directly against global amount-0 output indices.
+        // The decoy picker translates bucket ranks through these lists; every
+        // downstream use (ring bound, direct enumeration, back() checks and
+        // the distinct-pick loop exit) assumes they are strictly increasing,
+        // so a daemon sending unsorted or duplicated indices must be rejected
+        // here rather than skew rings or stall picking later.
+        const auto strictly_increasing = [](const std::vector<uint64_t>& v) {
+          return std::adjacent_find(v.begin(), v.end(),
+              [](uint64_t a, uint64_t b) { return a >= b; }) == v.end();
+        };
+
         if (needs_native_rct_distribution)
         {
           THROW_WALLET_EXCEPTION_IF(native_offsets.size() <= DEFAULT_TX_SPENDABLE_AGE_V17,
@@ -10465,6 +10475,8 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
               error::get_output_distribution, "Daemon did not provide native output indices");
           THROW_WALLET_EXCEPTION_IF(native_output_indices.back() < max_native_rct_index,
               error::get_output_distribution, "Daemon reports suspicious native rct output indices");
+          THROW_WALLET_EXCEPTION_IF(!strictly_increasing(native_output_indices),
+              error::get_output_distribution, "Daemon native output indices are not strictly increasing");
         }
 
         if (needs_token_rct_distribution)
@@ -10475,6 +10487,8 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
               error::get_output_distribution, "Daemon did not provide token output indices");
           THROW_WALLET_EXCEPTION_IF(token_output_indices.back() < max_token_rct_index,
               error::get_output_distribution, "Daemon reports suspicious token rct output indices");
+          THROW_WALLET_EXCEPTION_IF(!strictly_increasing(token_output_indices),
+              error::get_output_distribution, "Daemon token output indices are not strictly increasing");
         }
       }
     }
@@ -10657,6 +10671,14 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
         auto *picker = spending_token ? gamma_token_picker.get() : gamma_native_picker.get();
         THROW_WALLET_EXCEPTION_IF(!picker, error::wallet_internal_error, "No gamma picker for spend type");
         num_outs = picker->get_num_rct_outs();
+        // num_outs comes from the offsets array but every rank in [0, num_outs)
+        // is read out of the indices array: a daemon sending fewer indices than
+        // the distribution claims would turn those reads out-of-range and leave
+        // the picking loop with no exit, so the two lists must agree here.
+        const auto& spend_indices = spending_token ? token_output_indices : native_output_indices;
+        THROW_WALLET_EXCEPTION_IF(spend_indices.size() < num_outs, error::get_output_distribution,
+            std::string("Daemon sent ") + (spending_token ? "token" : "native") +
+            " output indices inconsistent with its output distribution");
         LOG_PRINT_L1("" << num_outs << " unlocked " << (spending_token ? "token" : "native") << " rct outputs");
         THROW_WALLET_EXCEPTION_IF(num_outs == 0, error::wallet_internal_error,
             "histogram reports no unlocked rct outputs, not even ours");
@@ -10798,8 +10820,18 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
             auto *picker  = spending_token ? gamma_token_picker.get()  : gamma_native_picker.get();
             const auto &indices = spending_token ? token_output_indices : native_output_indices;
             THROW_WALLET_EXCEPTION_IF(!picker, error::wallet_internal_error, "No gamma picker for spend type");
+            // pick() legitimately returns uint64_t::max() now and then (gamma
+            // tail, empty blocks), so retries are expected -- but they must be
+            // bounded, or a daemon-supplied distribution whose mass lies
+            // outside the translatable range spins this loop forever.
             uint64_t rank;
-            do rank = picker->pick(); while (rank >= indices.size());
+            size_t pick_attempts = 0;
+            do
+            {
+              THROW_WALLET_EXCEPTION_IF(++pick_attempts > 10000, error::get_output_distribution,
+                  "Failed to pick a decoy from the daemon's output distribution");
+              rank = picker->pick();
+            } while (rank >= indices.size());
 
             i = indices[rank];
             type = spending_token ? "token-gamma" : "native-gamma";
