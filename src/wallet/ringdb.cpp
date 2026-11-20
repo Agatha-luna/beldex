@@ -272,14 +272,27 @@ bool ringdb::add_rings(const crypto::chacha_key &chacha_key, const cryptonote::t
 
   for (const auto &in: tx.vin)
   {
-    if (!std::holds_alternative<cryptonote::txin_to_key>(in))
+    // M14: token inputs (txin_zy_input) carry the same key image and relative
+    // ring offsets as native ones and must be remembered too, or a re-spend
+    // picks a fresh ring that can be intersected with the first.
+    const crypto::key_image *k_image = nullptr;
+    const std::vector<uint64_t> *key_offsets = nullptr;
+    if (const auto *txin = std::get_if<cryptonote::txin_to_key>(&in))
+    {
+      k_image = &txin->k_image;
+      key_offsets = &txin->key_offsets;
+    }
+    else if (const auto *txin = std::get_if<cryptonote::txin_zy_input>(&in))
+    {
+      k_image = &txin->k_image;
+      key_offsets = &txin->key_offsets;
+    }
+    else
       continue;
-    const auto &txin = var::get<cryptonote::txin_to_key>(in);
-    const uint32_t ring_size = txin.key_offsets.size();
-    if (ring_size == 1)
+    if (key_offsets->size() == 1)
       continue;
 
-    store_relative_ring(txn, dbi_rings, txin.k_image, txin.key_offsets, chacha_key);
+    store_relative_ring(txn, dbi_rings, *k_image, *key_offsets, chacha_key);
   }
 
   dbr = mdb_txn_commit(txn);
@@ -331,13 +344,18 @@ bool ringdb::remove_rings(const crypto::chacha_key &chacha_key, const cryptonote
   key_images.reserve(tx.vin.size());
   for (const auto &in: tx.vin)
   {
-    if (!std::holds_alternative<cryptonote::txin_to_key>(in))
-      continue;
-    const auto &txin = var::get<cryptonote::txin_to_key>(in);
-    const uint32_t ring_size = txin.key_offsets.size();
-    if (ring_size == 1)
-      continue;
-    key_images.push_back(txin.k_image);
+    // M14: mirror add_rings -- token inputs are stored, so they must be
+    // removable by the same walk over the tx.
+    if (const auto *txin = std::get_if<cryptonote::txin_to_key>(&in))
+    {
+      if (txin->key_offsets.size() > 1)
+        key_images.push_back(txin->k_image);
+    }
+    else if (const auto *txin = std::get_if<cryptonote::txin_zy_input>(&in))
+    {
+      if (txin->key_offsets.size() > 1)
+        key_images.push_back(txin->k_image);
+    }
   }
   return remove_rings(chacha_key, key_images);
 }
