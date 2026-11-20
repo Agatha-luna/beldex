@@ -3417,18 +3417,23 @@ std::vector<wallet2::get_pool_state_tx> wallet2::get_pool_state(bool refreshed)
         // the inputs aren't spent anymore, since the tx failed
         for (size_t vini = 0; vini < pit->second.m_tx.vin.size(); ++vini)
         {
-          if (std::holds_alternative<txin_to_key>(pit->second.m_tx.vin[vini]))
+          // M13: token inputs (txin_zy_input) must be released like native
+          // ones, or a dropped token tx leaves them "spent" until a rescan.
+          crypto::key_image k_image;
+          if (const auto* in_native = std::get_if<txin_to_key>(&pit->second.m_tx.vin[vini]))
+            k_image = in_native->k_image;
+          else if (const auto* in_token = std::get_if<txin_zy_input>(&pit->second.m_tx.vin[vini]))
+            k_image = in_token->k_image;
+          else
+            continue;
+          for (size_t i = 0; i < m_transfers.size(); ++i)
           {
-            txin_to_key &tx_in_to_key = var::get<txin_to_key>(pit->second.m_tx.vin[vini]);
-            for (size_t i = 0; i < m_transfers.size(); ++i)
+            const transfer_details &td = m_transfers[i];
+            if (td.m_key_image == k_image)
             {
-              const transfer_details &td = m_transfers[i];
-              if (td.m_key_image == tx_in_to_key.k_image)
-              {
-                 LOG_PRINT_L1("Resetting spent status for output " << vini << ": " << td.m_key_image);
-                 set_unspent(i);
-                 break;
-              }
+               LOG_PRINT_L1("Resetting spent status for output " << vini << ": " << td.m_key_image);
+               set_unspent(i);
+               break;
             }
           }
         }
