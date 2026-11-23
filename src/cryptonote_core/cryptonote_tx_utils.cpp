@@ -86,9 +86,9 @@ namespace cryptonote
   }
   //---------------------------------------------------------------
   // A tx carrying privacy-token content must keep the plain tx pubkey R = s*G:
-  // the zy_balance_proof binds itself to tx_key.sec against that relation (see
-  // double_schnorr_sig_s), and a verifier cannot check the R = s*D form used
-  // for a single subaddress destination.
+  // the token proof message binds the finalized tx (prefix hash included), and
+  // a verifier cannot check the R = s*D compressed form used for a single
+  // subaddress destination, so token txs always use the canonical form.
   static bool tx_has_zyphora_content(const beldex_construct_tx_params& tx_params, const std::vector<tx_source_entry>& sources, const std::vector<tx_destination_entry>& destinations)
   {
     return tx_params.tx_type == txtype::register_privacy_token ||
@@ -645,14 +645,14 @@ namespace cryptonote
     // HF21: multiple distinct privacy tokens (plus native BDX) are allowed
     // in one tx. The zy_balance_proof stays sound because the residual commitment
     // P = sum_in_C - sum_out_C expands to
-    //   Σ_token token_id_a*(Σin_a - Σout_a)  +  secret_x*X  +  (mask delta)*G,
-    // the mask delta is forced to zero by the input-mask fixup below, and the
-    // per-token token_id terms vanish only if EACH token independently conserves
-    // (token_id_a, X, G are linearly independent hash-derived points, so the
-    // double-Schnorr that proves P == secret_x*X can't verify otherwise). The
-    // surjection (per-output BGE) and outputs range proof already tag each output
-    // by its OWN blinded_token_id, and verTokenProofs explicitly permits mixed
-    // token ids -- so no single-token restriction is needed here.
+    //   Σ_token token_id_a*(Σin_a - Σout_a)  +  secret_x*X  +  mask_delta*G,
+    // and the per-token token_id terms vanish only if EACH token independently
+    // conserves (token_id_a, X, G are linearly independent hash-derived points,
+    // so the linear-composition proof that P lies in span(G, X) can't verify
+    // otherwise). The surjection (per-output BGE) and outputs range proof
+    // already tag each output by its OWN blinded_token_id, and verTokenProofs
+    // explicitly permits mixed token ids -- so no single-token restriction is
+    // needed here.
     //
     // Sanity check only: every privacy-token destination must be backed by a
     // spent source of the SAME token (mints add their outputs via deploy/mint,
@@ -1517,71 +1517,18 @@ namespace cryptonote
 
           }
 
-          // ── HF21: force the input-side mask delta to zero ───────────────────
-          // Pick one zyphora input (if any) and recompute its pseudo-output
-          // mask deterministically so that
-          //   sum(pseudo_out masks) == sum(new zyphora output masks)
-          // exactly, with no free/random residual left over. Output masks
-          // can't be adjusted this way (they're derivation-bound so the
-          // recipient can independently recompute them while scanning), so
-          // this must happen on the pseudo-output side, which has no such
-          // constraint. Mirrors Zano's generate_ZY_sig
-          // (currency_format_utils.cpp:2461-2472): forcing this G-component
-          // to zero lets the balance proof below be a plain two-leg Schnorr
-          // (secret_x over X, tx_key.sec over G) instead of a more complex
-          // joint (mask, secret_x) representation proof.
-          {
-            size_t balancing_idx = SIZE_MAX;
-            for (size_t i = 0; i < zy_pending.size(); ++i)
-              if (zy_pending[i]) { balancing_idx = i; break; }
-
-            if (balancing_idx != SIZE_MAX)
-            {
-              rct::key sum_out_masks = rct::zero();
-              for (const auto& op : zy_out_pending)
-                if (op)
-                  sc_add(sum_out_masks.bytes, sum_out_masks.bytes, op->amount_mask.bytes);
-
-              rct::key sum_other_in_masks = rct::zero();
-              for (size_t i = 0; i < zy_pending.size(); ++i)
-              {
-                if (!zy_pending[i] || i == balancing_idx)
-                  continue;
-                sc_add(sum_other_in_masks.bytes, sum_other_in_masks.bytes, zy_pending[i]->pseudo_amount_mask.bytes);
-              }
-
-              rct::key new_pseudo_mask;
-              sc_sub(new_pseudo_mask.bytes, sum_out_masks.bytes, sum_other_in_masks.bytes);
-
-              // burn_token: leave a G-residual of exactly aop_mask instead of
-              // zero, so that after the balance proof below subtracts the burn
-              // commitment (aop_commitment = declared_amount*token_id +
-              // aop_mask*G) the G-component cancels back to zero and the proof
-              // stays a plain two-leg Schnorr.
-              if (tx.type == txtype::burn_token)
-                sc_add(new_pseudo_mask.bytes, new_pseudo_mask.bytes, aop_mask.bytes);
-
-              auto& bp = *zy_pending[balancing_idx];
-              // real_mask = old_pseudo_mask + old_f  (since f = real_mask - pseudo_mask)
-              rct::key real_mask;
-              sc_add(real_mask.bytes, bp.pseudo_amount_mask.bytes, bp.amount_mask_diff.bytes);
-
-              rct::key new_f;
-              sc_sub(new_f.bytes, real_mask.bytes, new_pseudo_mask.bytes);
-
-              const rct::key token_id_pt = rct::tid2rct(sources[balancing_idx].token_id);
-              rct::key T_real = rct::blindTokenId(token_id_pt, bp.real_r);
-              rct::key new_pseudo_A = rct::commitToken(new_pseudo_mask, T_real, sources[balancing_idx].amount);
-
-              bp.pseudo_amount_mask = new_pseudo_mask;
-              bp.amount_mask_diff = new_f;
-              bp.pseudo_out_amount_commitment = new_pseudo_A;
-
-              // The recomputed pseudo-out commitment is carried solely in the
-              // ZY_sig, built below from this updated zy_pending entry -- there
-              // is no on-chain input field left to keep in sync.
-            }
-          }
+          // ── HF21: pseudo-output masks stay fresh random scalars ─────────────
+          // The G-component of the balance residual (sum of pseudo-out masks
+          // minus sum of zy output masks) is deliberately NOT forced to zero.
+          // Output masks are derivation-bound (the recipient recomputes them
+          // while scanning), so a deterministic pseudo-out mask would be a
+          // known value to a recipient who owns every token output of the tx
+          // (a send with no token change). They could then strip mask*G from
+          // the public pseudo_out_amount_commitment, leaving amount*T_real,
+          // and match it against each ring member's public blinded token id
+          // -- unmasking the real spend. Instead the random mask delta is
+          // carried as the G-leg secret of the linear-composition balance
+          // proof below.
 
           // HF21: shared binding message for ZY_sig and token surjection
           // proofs. Must match rct::verTokenProofs on the consensus side
@@ -1735,18 +1682,21 @@ namespace cryptonote
           // destroyed by this spend. Required by verTokenProofs whenever the
           // tx has any zy input. Commitments are built as C = amount*T + mask*G
           // with T a per-input/per-output blinded token id (T = token_id +
-          // r*X, see rct::commitToken). The balancing-mask fixup above already
-          // forced the mask/G-component of this residual to exactly zero, so
-          // what's left is purely the X-component:
-          //   secret_x = Σ_inputs(real_r_i * amount_i) - Σ_outputs(r_j * amount_j)
+          // r*X, see rct::commitToken). The residual therefore lies in
+          // span(G, X):
+          //   mask_delta = Σ_inputs(pseudo_mask_i) - Σ_outputs(mask_j)   (over G)
+          //   secret_x   = Σ_inputs(real_r_i * amount_i) - Σ_outputs(r_j * amount_j)  (over X)
           // (each input's real_r_i is the SAME blinding scalar used to build
           // its pseudo_out_amount_commitment -- see T_real in the zy input
           // loop above; each output's r_j is its own token-id blinding scalar).
-          // generate_double_schnorr_sig binds knowledge of secret_x (over X)
-          // *and* knowledge of tx_key.sec (against tx_pub_key, over G) under
-          // one challenge, so the proof can't be detached from this specific
-          // transaction (tx_has_zyphora_content above guarantees tx_pub_key
-          // == tx_key.sec*G here, never the R=s*D compressed form).
+          // generate_linear_composition_proof shows P = mask_delta*G +
+          // secret_x*X: since token-id points are hash-to-point, P lying in
+          // span(G, X) proves the token-id component of the residual is zero.
+          // mask_delta is intentionally random (see the pseudo-output note
+          // above) so the recipient of the tx's token outputs learns nothing
+          // about which ring member is the real spend. Binding to this exact
+          // tx comes from token_proof_message, which hashes the finalized tx
+          // (prefix hash included, hence the tx pubkey too).
           {
             bool has_zy_inputs = false;
             for (const auto& p : zy_pending)
@@ -1756,6 +1706,7 @@ namespace cryptonote
             {
               rct::key sum_in_C = rct::zero();
               rct::key secret_x_in = rct::zero();
+              rct::key mask_delta = rct::zero();
               for (size_t i = 0; i < zy_pending.size(); ++i)
               {
                 const auto& p = zy_pending[i];
@@ -1765,6 +1716,7 @@ namespace cryptonote
                 rct::key r_amount;
                 sc_mul(r_amount.bytes, p->real_r.bytes, rct::d2h(sources[i].amount).bytes);
                 sc_add(secret_x_in.bytes, secret_x_in.bytes, r_amount.bytes);
+                sc_add(mask_delta.bytes, mask_delta.bytes, p->pseudo_amount_mask.bytes);
               }
 
               rct::key sum_out_C = rct::zero();
@@ -1778,6 +1730,7 @@ namespace cryptonote
                 rct::key r_amount;
                 sc_mul(r_amount.bytes, op->blind_r.bytes, rct::d2h(destinations[j].amount).bytes);
                 sc_add(secret_x_out.bytes, secret_x_out.bytes, r_amount.bytes);
+                sc_sub(mask_delta.bytes, mask_delta.bytes, op->amount_mask.bytes);
               }
 
               rct::key P;
@@ -1788,17 +1741,18 @@ namespace cryptonote
 
               if (tx_params.tx_type == txtype::burn_token)
               {
-                // Subtract the publicly-declared burn commitment from the
-                // residual. The input-mask fixup above already injected aop_mask
-                // as the G-residual, so this subtraction cancels the G-component
-                // to zero, leaving P == secret_x*X for the two-leg Schnorr below.
+                // Subtract the publicly-declared burn commitment
+                // (aop_commitment = declared_amount*token_id + aop_mask*G, no
+                // X-component) from the residual; its mask joins the G-leg
+                // secret of the representation proof below.
                 rct::subKeys(P, P, aop_commitment);
+                sc_sub(mask_delta.bytes, mask_delta.bytes, aop_mask.bytes);
               }
 
               rct::zy_balance_proof bal{};
               bal.P = P;
-              if (!crypto::generate_double_schnorr_sig(token_proof_message, P, secret_x,
-                                                        rct::pk2rct(txkey_pub), rct::sk2rct(tx_key), bal.dss))
+              if (!crypto::generate_linear_composition_proof(token_proof_message, P,
+                                                             mask_delta, secret_x, bal.lcp))
               {
                 LOG_ERROR("Failed to generate zy_balance_proof");
                 return false;

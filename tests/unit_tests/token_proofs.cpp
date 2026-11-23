@@ -94,6 +94,78 @@ TEST(TokenProofs, CompositionAndDoubleSchnorrRejectEveryScalarAlias)
   reject_scalar_alias(proof, [](auto& p) -> auto& { return p.c; }, vd);
 }
 
+// M12 regression: with the old deterministic pseudo-output mask (forced to
+// the sum of the token output masks), a recipient who owns every token output
+// of a tx knows that sum -- output masks are derivation-bound -- and could
+// strip mask*G from the public pseudo-out amount commitment, leaving
+// amount*T_real, which matches exactly one ring member's public blinded token
+// id and unmasks the real spend. Random pseudo-out masks remove the
+// distinguisher; the mask delta is carried instead as the G-leg of the
+// linear-composition balance proof. This encodes both sides of that statement
+// at the commitment level, with the same sign conventions construct_tx uses.
+TEST(TokenProofs, BalanceProofMaskDeltaHidesRealRingMember)
+{
+  rct::key token_pt; // stand-in hash-to-point token id (no known dlog to G or X)
+  {
+    ge_p3 p3;
+    rct::hash_to_p3(p3, rct::d2h(42));
+    ge_p3_tobytes(token_pt.bytes, &p3);
+  }
+  const uint64_t amount = 1000;
+
+  // Ring of public blinded token ids; one is the real spend.
+  constexpr size_t ring_size = 8, real_index = 2;
+  rct::keyV ring_T(ring_size), ring_r(ring_size);
+  for (size_t k = 0; k < ring_size; ++k)
+  {
+    ring_r[k] = rct::skGen();
+    ring_T[k] = rct::blindTokenId(token_pt, ring_r[k]);
+  }
+
+  // The recipient's own output: mask and token blind are derivation-bound,
+  // so the recipient of a no-change transfer knows both.
+  const rct::key out_mask = rct::skGen();
+  const rct::key out_r    = rct::skGen();
+  const rct::key out_T    = rct::blindTokenId(token_pt, out_r);
+  const rct::key out_C    = rct::commitToken(out_mask, out_T, amount);
+
+  // The recipient's attack: strip the known mask*G from the public
+  // pseudo-out commitment and compare against amount*T_k for each member.
+  auto unmask = [&](const rct::key& pseudo_A, const rct::key& known_mask) -> size_t {
+    rct::key stripped;
+    rct::subKeys(stripped, pseudo_A, rct::scalarmultBase(known_mask));
+    for (size_t k = 0; k < ring_size; ++k)
+      if (rct::scalarmultKey(ring_T[k], rct::d2h(amount)) == stripped)
+        return k;
+    return ring_size;
+  };
+
+  // Old construction (pseudo mask == recipient-known output mask sum):
+  // the attack identifies the real ring member.
+  const rct::key leaky_A = rct::commitToken(out_mask, ring_T[real_index], amount);
+  EXPECT_EQ(unmask(leaky_A, out_mask), real_index);
+
+  // New construction (fresh random pseudo mask): no member matches.
+  const rct::key pseudo_mask = rct::skGen();
+  const rct::key pseudo_A = rct::commitToken(pseudo_mask, ring_T[real_index], amount);
+  EXPECT_EQ(unmask(pseudo_A, out_mask), ring_size);
+
+  // The sender still proves conservation: P = pseudo_A - out_C opens as
+  // mask_delta*G + secret_x*X, exactly as construct_tx builds the
+  // zy_balance_proof (mask delta on the G-leg, token-blind delta on X).
+  rct::key P;
+  rct::subKeys(P, pseudo_A, out_C);
+  rct::key mask_delta, secret_x, t;
+  sc_sub(mask_delta.bytes, pseudo_mask.bytes, out_mask.bytes);
+  sc_mul(secret_x.bytes, ring_r[real_index].bytes, rct::d2h(amount).bytes);
+  sc_mul(t.bytes, out_r.bytes, rct::d2h(amount).bytes);
+  sc_sub(secret_x.bytes, secret_x.bytes, t.bytes);
+  const rct::key msg = rct::d2h(99);
+  crypto::linear_composition_proof_s bal{};
+  ASSERT_TRUE(crypto::generate_linear_composition_proof(msg, P, mask_delta, secret_x, bal));
+  EXPECT_TRUE(crypto::verify_linear_composition_proof(msg, P, bal));
+}
+
 TEST(TokenProofs, MalformedPointsAreRejectedWithoutThrowing)
 {
   const rct::key invalid = {{2}};

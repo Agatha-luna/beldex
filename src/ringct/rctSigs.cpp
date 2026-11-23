@@ -2305,8 +2305,16 @@ namespace rct {
                 reason = "zy_balance_proof statement mismatch";
                 return false;
             }
-            const rct::key tx_pub_key_rct = rct::pk2rct(cryptonote::get_tx_pub_key_from_extra(tx));
-            if (!crypto::verify_double_schnorr_sig(tx_prefix_hash, bal->P, tx_pub_key_rct, bal->dss))
+            // P must open as mask_delta*G + secret_x*X. Token-id points are
+            // hash-to-point (unknown discrete log w.r.t. G and X), so P lying
+            // in span(G, X) proves the residual carries no token-id component,
+            // i.e. token value is conserved. The G-leg (mask delta) is a
+            // sender-chosen random secret -- deliberately not forced to zero,
+            // so a recipient who can reconstruct the output masks learns
+            // nothing about the real ring member from the pseudo-out
+            // commitments. Binding to this tx comes from tx_prefix_hash
+            // (get_hf21_token_proof_message over the finalized tx).
+            if (!crypto::verify_linear_composition_proof(tx_prefix_hash, bal->P, bal->lcp))
             {
                 reason = "zy_balance_proof verification failed";
                 return false;
