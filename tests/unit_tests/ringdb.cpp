@@ -131,6 +131,38 @@ TEST(ringdb, different_genesis)
   ASSERT_FALSE(ringdb.get_ring(get_context().KEY_2, get_context().KEY_IMAGE_1, outs2));
 }
 
+// M14 regression: rings of token inputs (txin_zy_input) must be remembered
+// and forgotten through the same tx walk as native ones, or a re-spend of the
+// token output picks a fresh ring that intersects the published one.
+TEST(ringdb, token_inputs_round_trip)
+{
+  RingDB ringdb;
+  const crypto::key_image native_ki = generate_key_image();
+  const crypto::key_image token_ki = generate_key_image();
+
+  cryptonote::transaction_prefix tx{};
+  cryptonote::txin_to_key native_in{};
+  native_in.k_image = native_ki;
+  native_in.key_offsets = {43, 7320, 8429};
+  tx.vin.emplace_back(native_in);
+  cryptonote::txin_zy_input token_in{};
+  token_in.k_image = token_ki;
+  token_in.key_offsets = {10, 5, 7};
+  tx.vin.emplace_back(token_in);
+
+  ASSERT_TRUE(ringdb.add_rings(get_context().KEY_1, tx));
+
+  std::vector<uint64_t> outs;
+  ASSERT_TRUE(ringdb.get_ring(get_context().KEY_1, native_ki, outs));
+  EXPECT_EQ(outs, (std::vector<uint64_t>{43, 43 + 7320, 43 + 7320 + 8429}));
+  ASSERT_TRUE(ringdb.get_ring(get_context().KEY_1, token_ki, outs));
+  EXPECT_EQ(outs, (std::vector<uint64_t>{10, 15, 22}));
+
+  ASSERT_TRUE(ringdb.remove_rings(get_context().KEY_1, tx));
+  EXPECT_FALSE(ringdb.get_ring(get_context().KEY_1, native_ki, outs));
+  EXPECT_FALSE(ringdb.get_ring(get_context().KEY_1, token_ki, outs));
+}
+
 TEST(spent_outputs, not_found)
 {
   RingDB ringdb;

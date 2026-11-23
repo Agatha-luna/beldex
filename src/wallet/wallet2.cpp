@@ -3417,18 +3417,23 @@ std::vector<wallet2::get_pool_state_tx> wallet2::get_pool_state(bool refreshed)
         // the inputs aren't spent anymore, since the tx failed
         for (size_t vini = 0; vini < pit->second.m_tx.vin.size(); ++vini)
         {
-          if (std::holds_alternative<txin_to_key>(pit->second.m_tx.vin[vini]))
+          // M13: token inputs (txin_zy_input) must be released like native
+          // ones, or a dropped token tx leaves them "spent" until a rescan.
+          crypto::key_image k_image;
+          if (const auto* in_native = std::get_if<txin_to_key>(&pit->second.m_tx.vin[vini]))
+            k_image = in_native->k_image;
+          else if (const auto* in_token = std::get_if<txin_zy_input>(&pit->second.m_tx.vin[vini]))
+            k_image = in_token->k_image;
+          else
+            continue;
+          for (size_t i = 0; i < m_transfers.size(); ++i)
           {
-            txin_to_key &tx_in_to_key = var::get<txin_to_key>(pit->second.m_tx.vin[vini]);
-            for (size_t i = 0; i < m_transfers.size(); ++i)
+            const transfer_details &td = m_transfers[i];
+            if (td.m_key_image == k_image)
             {
-              const transfer_details &td = m_transfers[i];
-              if (td.m_key_image == tx_in_to_key.k_image)
-              {
-                 LOG_PRINT_L1("Resetting spent status for output " << vini << ": " << td.m_key_image);
-                 set_unspent(i);
-                 break;
-              }
+               LOG_PRINT_L1("Resetting spent status for output " << vini << ": " << td.m_key_image);
+               set_unspent(i);
+               break;
             }
           }
         }
@@ -10457,6 +10462,16 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
       {
         // Sanity-check each bucket independently. The per-bucket distributions are filtered, so
         // their counts cannot be compared directly against global amount-0 output indices.
+        // The decoy picker translates bucket ranks through these lists; every
+        // downstream use (ring bound, direct enumeration, back() checks and
+        // the distinct-pick loop exit) assumes they are strictly increasing,
+        // so a daemon sending unsorted or duplicated indices must be rejected
+        // here rather than skew rings or stall picking later.
+        const auto strictly_increasing = [](const std::vector<uint64_t>& v) {
+          return std::adjacent_find(v.begin(), v.end(),
+              [](uint64_t a, uint64_t b) { return a >= b; }) == v.end();
+        };
+
         if (needs_native_rct_distribution)
         {
           THROW_WALLET_EXCEPTION_IF(native_offsets.size() <= DEFAULT_TX_SPENDABLE_AGE_V17,
@@ -10465,6 +10480,8 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
               error::get_output_distribution, "Daemon did not provide native output indices");
           THROW_WALLET_EXCEPTION_IF(native_output_indices.back() < max_native_rct_index,
               error::get_output_distribution, "Daemon reports suspicious native rct output indices");
+          THROW_WALLET_EXCEPTION_IF(!strictly_increasing(native_output_indices),
+              error::get_output_distribution, "Daemon native output indices are not strictly increasing");
         }
 
         if (needs_token_rct_distribution)
@@ -10475,6 +10492,8 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
               error::get_output_distribution, "Daemon did not provide token output indices");
           THROW_WALLET_EXCEPTION_IF(token_output_indices.back() < max_token_rct_index,
               error::get_output_distribution, "Daemon reports suspicious token rct output indices");
+          THROW_WALLET_EXCEPTION_IF(!strictly_increasing(token_output_indices),
+              error::get_output_distribution, "Daemon token output indices are not strictly increasing");
         }
       }
     }
@@ -10657,6 +10676,14 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
         auto *picker = spending_token ? gamma_token_picker.get() : gamma_native_picker.get();
         THROW_WALLET_EXCEPTION_IF(!picker, error::wallet_internal_error, "No gamma picker for spend type");
         num_outs = picker->get_num_rct_outs();
+        // num_outs comes from the offsets array but every rank in [0, num_outs)
+        // is read out of the indices array: a daemon sending fewer indices than
+        // the distribution claims would turn those reads out-of-range and leave
+        // the picking loop with no exit, so the two lists must agree here.
+        const auto& spend_indices = spending_token ? token_output_indices : native_output_indices;
+        THROW_WALLET_EXCEPTION_IF(spend_indices.size() < num_outs, error::get_output_distribution,
+            std::string("Daemon sent ") + (spending_token ? "token" : "native") +
+            " output indices inconsistent with its output distribution");
         LOG_PRINT_L1("" << num_outs << " unlocked " << (spending_token ? "token" : "native") << " rct outputs");
         THROW_WALLET_EXCEPTION_IF(num_outs == 0, error::wallet_internal_error,
             "histogram reports no unlocked rct outputs, not even ours");
@@ -10798,8 +10825,18 @@ void wallet2::get_outs(std::vector<std::vector<tools::wallet2::get_outs_entry>> 
             auto *picker  = spending_token ? gamma_token_picker.get()  : gamma_native_picker.get();
             const auto &indices = spending_token ? token_output_indices : native_output_indices;
             THROW_WALLET_EXCEPTION_IF(!picker, error::wallet_internal_error, "No gamma picker for spend type");
+            // pick() legitimately returns uint64_t::max() now and then (gamma
+            // tail, empty blocks), so retries are expected -- but they must be
+            // bounded, or a daemon-supplied distribution whose mass lies
+            // outside the translatable range spins this loop forever.
             uint64_t rank;
-            do rank = picker->pick(); while (rank >= indices.size());
+            size_t pick_attempts = 0;
+            do
+            {
+              THROW_WALLET_EXCEPTION_IF(++pick_attempts > 10000, error::get_output_distribution,
+                  "Failed to pick a decoy from the daemon's output distribution");
+              rank = picker->pick();
+            } while (rank >= indices.size());
 
             i = indices[rank];
             type = spending_token ? "token-gamma" : "native-gamma";
@@ -15594,23 +15631,32 @@ bool wallet2::check_reserve_proof(const cryptonote::account_public_address &addr
       for (size_t k = 0; k < proof.index_in_tx; ++k)
         if (!std::holds_alternative<cryptonote::tx_out_zyphora>(tx.vout[k].target))
           ++rct_index;
+      THROW_WALLET_EXCEPTION_IF(rct_index >= tx.rct_signatures.ecdhInfo.size() || rct_index >= tx.rct_signatures.outPk.size(),
+        error::wallet_internal_error, "rct index is out of bound");
       rct::ecdhTuple ecdh_info = tx.rct_signatures.ecdhInfo[rct_index];
       rct::ecdhDecode(ecdh_info, rct::sk2rct(shared_secret), tools::equals_any(tx.rct_signatures.type, rct::RCTType::Bulletproof2, rct::RCTType::CLSAG, rct::RCTType::BulletproofPlus));
+      // The decrypted ecdh hint is written by the tx author, who is also the
+      // prover here; only recomputing the on-chain commitment authenticates it.
+      const rct::key C = tx.rct_signatures.outPk[rct_index].mask;
+      rct::key Ctmp;
+      THROW_WALLET_EXCEPTION_IF(sc_check(ecdh_info.mask.bytes) != 0, error::wallet_internal_error, "Bad ECDH input mask");
+      THROW_WALLET_EXCEPTION_IF(sc_check(ecdh_info.amount.bytes) != 0, error::wallet_internal_error, "Bad ECDH input amount");
+      rct::addKeys2(Ctmp, ecdh_info.mask, ecdh_info.amount, rct::H);
+      THROW_WALLET_EXCEPTION_IF(!rct::equalKeys(C, Ctmp), error::wallet_internal_error,
+        "Decoded amount does not match the output commitment; the reserve proof is misleading");
       amount = rct::h2d(ecdh_info.amount);
     }
     else if (std::holds_alternative<cryptonote::tx_out_zyphora>(tx.vout[proof.index_in_tx].target))
     {
       const auto& zout = std::get<cryptonote::tx_out_zyphora>(tx.vout[proof.index_in_tx].target);
-      rct::key r = cryptonote::zyphora_derivation_to_scalar(derivation, proof.index_in_tx, "token_blind");
-      rct::key rX = rct::scalarmultX(r);
-      rct::key token_id_rct;
-      rct::subKeys(token_id_rct, rct::tid2rct(zout.blinded_token_id), rX);
-      token_id = reinterpret_cast<const crypto::token_id&>(rct::rct2pk(token_id_rct));
-
-      rct::key enc_mask = cryptonote::zyphora_derivation_to_scalar(derivation, proof.index_in_tx, "enc_amount");
-      uint64_t enc_mask_64;
-      memcpy(&enc_mask_64, enc_mask.bytes, sizeof(uint64_t));
-      amount = zout.encrypted_amount ^ enc_mask_64;
+      // The encrypted amount is written by the tx author, who is also the
+      // prover here; decode_zyphora_output recomputes C = amount*T + mask*G
+      // against the on-chain commitment, the only step that authenticates it.
+      rct::key amount_mask{}, token_blinding_mask{};
+      THROW_WALLET_EXCEPTION_IF(!cryptonote::decode_zyphora_output(m_account.get_keys(), zout, derivation,
+          proof.index_in_tx, amount, token_id, amount_mask, token_blinding_mask),
+        error::wallet_internal_error,
+        "Decoded token amount does not match the output commitment; the reserve proof is misleading");
     }
     
     if (token_id == crypto::null_tid)
