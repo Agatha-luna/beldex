@@ -116,6 +116,16 @@ namespace cryptonote
   }
 
   bool parse_tx_extra(const std::vector<uint8_t>& tx_extra, std::vector<tx_extra_field>& tx_extra_fields);
+
+  // Whether parse_tx_extra recognises the privacy-token fields (the token
+  // descriptor operation and the collateral lock). A node switches this off
+  // while its chain is before the privacy-token hard fork: nodes released
+  // before that fork do not know those two tags and fail to parse any tx_extra
+  // containing them, so every field of such an extra reads as absent to them.
+  // Parsing the same way keeps both releases in agreement until the fork.
+  // On by default, so wallets, tools and tests are unaffected.
+  void set_token_tx_extra_fields_enabled(bool enabled);
+  bool token_tx_extra_fields_enabled();
   bool sort_tx_extra(const std::vector<uint8_t>& tx_extra, std::vector<uint8_t>& sorted_tx_extra);
 
   template <typename T>

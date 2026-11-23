@@ -698,6 +698,7 @@ bool Blockchain::init(BlockchainDB* db, sqlite3 *bns_db, const network_type nett
     if (!update_next_cumulative_weight_limit())
       return false;
   }
+  update_token_tx_extra_parsing();
 
   if (bns_db && !m_bns_db.init(this, nettype, bns_db))
   {
@@ -918,6 +919,7 @@ block Blockchain::pop_block_from_blockchain()
   m_blocks_txs_check.clear();
 
   CHECK_AND_ASSERT_THROW_MES(update_next_cumulative_weight_limit(), "Error updating next cumulative weight limit");
+  update_token_tx_extra_parsing();
   m_tx_pool.on_blockchain_dec();
   invalidate_block_template_cache();
   return popped_block;
@@ -940,6 +942,7 @@ bool Blockchain::reset_and_set_genesis_block(const block& b)
   add_new_block(b, bvc, nullptr /*checkpoint*/);
   if (!update_next_cumulative_weight_limit())
     return false;
+  update_token_tx_extra_parsing();
   return bvc.m_added_to_main_chain && !bvc.m_verifivation_failed;
 }
 //------------------------------------------------------------------
@@ -3076,6 +3079,12 @@ hf Blockchain::get_network_version(std::optional<uint64_t> height) const {
   return cryptonote::get_network_version(m_nettype, *height);
 }
 
+//------------------------------------------------------------------
+void Blockchain::update_token_tx_extra_parsing()
+{
+  // The version the next block (and so the pool) is validated under.
+  cryptonote::set_token_tx_extra_fields_enabled(get_network_version() >= feature::PRIVACY_TOKENS);
+}
 //------------------------------------------------------------------
 void Blockchain::flush_invalid_blocks()
 {
@@ -5274,6 +5283,7 @@ bool Blockchain::handle_block_to_main_chain(const block& bl, const crypto::hash&
     MGINFO_RED("Failed to update next cumulative weight limit");
     return false;
   }
+  update_token_tx_extra_parsing();
 
   const hf blk_hf = get_network_version(new_height - 1);
 

@@ -1486,6 +1486,15 @@ namespace cryptonote
      * @return true
      */
     bool update_next_cumulative_weight_limit(uint64_t *long_term_effective_median_block_weight = NULL);
+
+    /**
+     * @brief makes tx_extra parsing follow the chain's hard fork
+     *
+     * Before the privacy-token fork the token fields in tx_extra are not
+     * recognised, as on releases from before the fork. Called whenever the
+     * chain tip changes.
+     */
+    void update_token_tx_extra_parsing();
     void return_tx_to_pool(std::vector<std::pair<transaction, blobdata>> &txs);
 
     /**

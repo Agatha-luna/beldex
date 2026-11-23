@@ -55,6 +55,10 @@ protected:
     const test_options options{{{hf::hf1, 0, 0, 0}}, 0};
     ASSERT_TRUE(chain.init(db, nullptr, FAKECHAIN, true, &options));
     ASSERT_TRUE(pool.init(0));
+    // The fixture chain sits at hf1, where a node reads the token tx_extra
+    // fields as absent (as pre-fork releases do). These tests put token txs
+    // straight into the pool as if the fork were active, so read them.
+    set_token_tx_extra_fields_enabled(true);
   }
   void TearDown() override
   {
