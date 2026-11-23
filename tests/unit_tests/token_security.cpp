@@ -768,6 +768,69 @@ TEST_F(TokenSecurity, OperationsCarryOnlyTheirOwnFields)
   }
 }
 
+// Releases from before the privacy-token fork do not know the two token
+// tx_extra tags: they accept a standard tx carrying them and read every field
+// of that extra as absent. Until the fork an upgraded node must do the same,
+// or the two releases disagree on the tx and on the block that contains it.
+TEST_F(TokenSecurity, TokenFieldsInTxExtraAreInertBeforeTheFork)
+{
+  struct restore_flag
+  {
+    const bool was = token_tx_extra_fields_enabled();
+    ~restore_flag() { set_token_tx_extra_fields_enabled(was); }
+  } restore;
+
+  for (const bool collateral : {false, true})
+  {
+    SCOPED_TRACE(collateral ? "collateral lock" : "token operation");
+    transaction tx{};
+    tx.version = txversion::v4_tx_types;
+    tx.type = txtype::standard;
+    if (collateral)
+      ASSERT_TRUE(add_collateral_lock_to_tx_extra(tx.extra, tx_extra_collateral_lock{}));
+    else
+      ASSERT_TRUE(add_token_descriptor_operation_to_tx_extra(tx.extra, registration));
+    ASSERT_TRUE(add_burned_amount_to_tx_extra(tx.extra, 12345));
+
+    // Before the fork: not a reason to reject, and the whole extra reads as
+    // unparseable, so the burn a pre-fork release cannot see is not seen here.
+    set_token_tx_extra_fields_enabled(false);
+    EXPECT_FALSE(tx_has_privacy_token_content(tx));
+    std::string reason;
+    EXPECT_TRUE(validate_tx_token_operations_against_db(db, tx, reason, hf::hf21_bulletproof_plus)) << reason;
+    std::vector<tx_extra_field> fields;
+    EXPECT_FALSE(parse_tx_extra(tx.extra, fields));
+    EXPECT_TRUE(fields.empty());
+    EXPECT_EQ(get_burned_amount_from_tx_extra(tx.extra), 0u);
+    tx_extra_token_descriptor_operation op{};
+    EXPECT_FALSE(get_token_descriptor_operation_from_tx_extra(tx.extra, op));
+
+    // From the fork on the fields are read normally, and a token operation
+    // outside a token tx type is rejected by the token rules.
+    set_token_tx_extra_fields_enabled(true);
+    EXPECT_TRUE(parse_tx_extra(tx.extra, fields));
+    EXPECT_EQ(fields.size(), 2u);
+    EXPECT_EQ(get_burned_amount_from_tx_extra(tx.extra), 12345u);
+    if (!collateral)
+      EXPECT_FALSE(validate_tx_token_operations_against_db(db, tx, reason, feature::PRIVACY_TOKENS));
+  }
+
+  // What a pre-fork release cannot parse is still rejected before the fork.
+  set_token_tx_extra_fields_enabled(false);
+  for (size_t kind = 0; kind < 4; ++kind)
+    EXPECT_TRUE(tx_has_privacy_token_content(make_tx(kind))) << kind;
+  transaction with_token_output{};
+  with_token_output.version = txversion::v4_tx_types;
+  with_token_output.type = txtype::standard;
+  with_token_output.vout.push_back(tx_out{0, tx_out_zyphora{}});
+  EXPECT_TRUE(tx_has_privacy_token_content(with_token_output));
+
+  // An extra without token fields is unaffected by the switch.
+  std::vector<uint8_t> plain;
+  ASSERT_TRUE(add_burned_amount_to_tx_extra(plain, 7));
+  EXPECT_EQ(get_burned_amount_from_tx_extra(plain), 7u);
+}
+
 // A tx with token outputs may have at most TX_BULLETPROOF_PLUS_MAX_OUTPUTS
 // outputs in total, native and token together.
 TEST(TokenOutputLimit, TooManyOutputsRejectedBeforeAnyProofIsRead)

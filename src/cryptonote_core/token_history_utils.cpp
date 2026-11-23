@@ -586,16 +586,13 @@ bool validate_tx_token_operations_against_db(
     std::string& reason,
     hf hf_version)
 {
+  // Before the fork there is no token state and nothing here to enforce. A
+  // token-field in tx.extra must not be a reason to reject: releases from
+  // before the fork accept such a tx, so rejecting it would split the chain.
+  // Token tx types, inputs, outputs and proofs are rejected before the fork
+  // by tx_has_privacy_token_content in check_tx_semantic / check_tx_inputs.
   if (hf_version < feature::PRIVACY_TOKENS)
-  {
-    tx_extra_token_descriptor_operation pre_fork_op{};
-    if (get_token_descriptor_operation_from_tx_extra(tx.extra, pre_fork_op, 0))
-    {
-      reason = "token descriptor operations are not allowed before the privacy-token hard fork";
-      return false;
-    }
     return true;
-  }
 
   size_t op_index = 0;
   tx_extra_token_descriptor_operation op{};

@@ -41,6 +41,18 @@
 #include "common/command_line.h"
 #include "common/util.h"
 #include "unit_tests_utils.h"
+#include "cryptonote_basic/cryptonote_format_utils.h"
+
+namespace {
+// A Blockchain switches token tx_extra parsing off while its chain is before
+// the privacy-token fork, and that switch is process-wide. Start every test
+// from the default so a test that drives a pre-fork chain does not change
+// what later tests parse.
+struct reset_token_tx_extra_parsing : ::testing::EmptyTestEventListener
+{
+  void OnTestStart(const ::testing::TestInfo&) override { cryptonote::set_token_tx_extra_fields_enabled(true); }
+};
+}
 
 namespace po = boost::program_options;
 
@@ -85,5 +97,6 @@ int main(int argc, char** argv)
 
   CATCH_ENTRY_L0("main", 1);
 
+  ::testing::UnitTest::GetInstance()->listeners().Append(new reset_token_tx_extra_parsing);
   return RUN_ALL_TESTS();
 }

@@ -614,6 +614,10 @@ namespace cryptonote
     return r;
   }
   //---------------------------------------------------------------
+  static std::atomic<bool> token_tx_extra_fields_enabled_flag{true};
+  void set_token_tx_extra_fields_enabled(bool enabled) { token_tx_extra_fields_enabled_flag = enabled; }
+  bool token_tx_extra_fields_enabled() { return token_tx_extra_fields_enabled_flag; }
+  //---------------------------------------------------------------
   [[nodiscard]] bool parse_tx_extra(const std::vector<uint8_t>& tx_extra, std::vector<tx_extra_field>& tx_extra_fields)
   {
     tx_extra_fields.clear();
@@ -628,6 +632,21 @@ namespace cryptonote
     } catch (const std::exception& e) {
       MWARNING(__func__ << ": failed to deserialize extra field: " << e.what() << "; extra = " << oxenc::to_hex(tx_extra.begin(), tx_extra.end()));
       return false;
+    }
+
+    // Before the privacy-token fork, fail exactly where a pre-fork release
+    // fails: on an extra that holds one of the two token fields.
+    if (!token_tx_extra_fields_enabled())
+    {
+      for (const auto& field : tx_extra_fields)
+      {
+        if (std::holds_alternative<tx_extra_token_descriptor_operation>(field) ||
+            std::holds_alternative<tx_extra_collateral_lock>(field))
+        {
+          tx_extra_fields.clear();
+          return false;
+        }
+      }
     }
 
     return true;
@@ -1043,12 +1062,12 @@ namespace cryptonote
       return true;
     if (!tx.zy_sig.empty() || !tx.token_proofs.empty())
       return true;
-    tx_extra_token_descriptor_operation tdo{};
-    if (get_token_descriptor_operation_from_tx_extra(tx.extra, tdo, 0))
-      return true;
-    tx_extra_collateral_lock lock{};
-    if (get_collateral_lock_from_tx_extra(tx.extra, lock))
-      return true;
+    // tx.extra is deliberately not inspected. This is the pre-fork gate, and
+    // it may only reject what a pre-fork release also rejects: the tx types,
+    // input and output variants and proof sections above, none of which such
+    // a release can parse. tx.extra is free-form to those releases, so a
+    // standard tx carrying token-field bytes there is valid to them and must
+    // be valid here too (see set_token_tx_extra_fields_enabled).
     return false;
   }
   //---------------------------------------------------------------
