@@ -38,6 +38,14 @@ bool verify_token_amount_commitment(const transaction& tx,
                                     const crypto::token_id& token_id,
                                     uint64_t declared_amount,
                                     std::string& reason)
+// The rct decode helpers (scalarmultKey/subKeys/addKeys) throw
+// std::runtime_error on an invalid point encoding, and the fields fed to them
+// here (op.amount_commitment, op.token_id, output amount_commitments) are
+// attacker-supplied. Nothing between this function and the network entry
+// points catches, so an uncaught throw unwinds tx/block processing without
+// ever marking the tx invalid. Consensus validation must return false, never
+// throw.
+try
 {
   if (!op.field_is_set(token_field_amount_commitment))
   {
@@ -119,6 +127,11 @@ bool verify_token_amount_commitment(const transaction& tx,
   }
 
   return true;
+}
+catch (const std::exception& e)
+{
+  reason = std::string("token amount-commitment verification error: ") + e.what();
+  return false;
 }
 
 void set_reason(std::string* reason, std::string value)
@@ -246,6 +259,24 @@ bool validate_token_descriptor_operation(const tx_extra_token_descriptor_operati
     default:
       reason = "unsupported token descriptor operation type";
       return false;
+  }
+
+  // Both fields are later fed into unscaled rct point arithmetic
+  // (verify_token_amount_commitment, verTokenProofs), so they must decode as
+  // valid curve points and, matching the torsion policy of the PT proofs,
+  // lie in the main subgroup. Honest values always do: token ids are
+  // hash-to-point outputs and commitments are combinations of main-subgroup
+  // generators.
+  if (op.field_is_set(token_field_token_id) && !rct::isInMainSubgroup(rct::tid2rct(op.token_id)))
+  {
+    reason = "token descriptor operation token_id is not a valid main-subgroup point";
+    return false;
+  }
+
+  if (op.field_is_set(token_field_amount_commitment) && !rct::isInMainSubgroup(rct::pk2rct(op.amount_commitment)))
+  {
+    reason = "token descriptor operation amount_commitment is not a valid main-subgroup point";
+    return false;
   }
 
   if (get_or_calculate_token_id(op) == crypto::null_tid)
