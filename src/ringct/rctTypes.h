@@ -723,12 +723,22 @@ namespace rct {
     struct zy_balance_proof
     {
       key P{};
-      // Proves P = secret_x*X (the mask/G-component is forced to exactly
-      // zero by construction -- see cryptonote_tx_utils.cpp's balancing-mask
-      // fixup), AND binds P to tx_pub_key = tx_key.sec*G under one shared
-      // challenge.
-      crypto::double_schnorr_sig_s dss;
-      BEGIN_SERIALIZE_OBJECT() FIELD(P) FIELD(dss) END_SERIALIZE()
+      // Proves P = mask_delta*G + secret_x*X, a two-generator representation
+      // proof over (G, X). Since token-id points are hash-to-point (unknown
+      // discrete log w.r.t. G and X), P lying in span(G, X) shows the
+      // commitment residual carries no token-id component, i.e. no token
+      // value was created or destroyed. mask_delta = sum(pseudo-out masks) -
+      // sum(zy output masks) (- the burn commitment's mask for burn_token)
+      // is a fresh random secret only the sender knows: deliberately NOT
+      // forced to zero, because a deterministic pseudo-out mask would let a
+      // recipient who owns every token output strip the known G-component
+      // from the (public) pseudo-out amount commitment and match the
+      // remaining amount*T_real against the ring members' blinded token ids,
+      // unmasking the real spend. Binding to this exact tx comes from the
+      // challenge message (get_hf21_token_proof_message hashes the finalized
+      // tx, including its prefix hash and therefore the tx pubkey).
+      crypto::linear_composition_proof_s lcp;
+      BEGIN_SERIALIZE_OBJECT() FIELD(P) FIELD(lcp) END_SERIALIZE()
     };
 
     struct token_operation_proof

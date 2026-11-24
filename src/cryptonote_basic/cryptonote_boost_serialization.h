@@ -499,7 +499,7 @@ namespace boost
   inline void serialize(Archive &a, rct::zy_balance_proof &x, const boost::serialization::version_type ver)
   {
     a & x.P;
-    a & x.dss;
+    a & x.lcp;
   }
   template <class Archive>
   inline void serialize(Archive &a, rct::token_operation_proof &x, const boost::serialization::version_type ver)

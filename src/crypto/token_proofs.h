@@ -116,20 +116,17 @@ bool verify_linear_composition_proof(const rct::key&                    msg,
 //
 // Proves knowledge of TWO independent scalars (s0, s1) such that
 // P0 = s0*X  and  P1 = s1*G, under one shared Fiat-Shamir challenge.
+// Mirrors Zano's generate_double_schnorr_sig<gt_X, gt_G>.
 //
-// Used to bind the privacy-token transfer balance proof (P0 = the
-// balance residual, s0 = secret_x) to the transaction's own keypair
-// (P1 = tx_pub_key, s1 = tx_key.sec) -- so a balance proof can't be detached
-// from / replayed against a transaction it wasn't actually generated for.
-//
-// P0 is provable as a pure X-multiple (no G-component) because amount
-// commitments are built on a per-input/per-output blinded token id
-// T = token_id + r*X (see rct::commitToken): summing several such
-// commitments for a balanced transfer leaves a residual secret_x*X, where
-// secret_x = Σ(real_r_i*amount_i) - Σ(r_j*amount_j) -- PROVIDED the
-// G-component (mask delta) is forced to exactly zero by deterministic
-// construction of one pseudo-output's mask (see cryptonote_tx_utils.cpp's
-// balancing-mask fixup). Mirrors Zano's generate_double_schnorr_sig<gt_X, gt_G>.
+// NOTE: no longer used by the privacy-token balance proof. That proof once
+// forced the balance residual's G-component to zero (via a deterministic
+// pseudo-output mask) so the residual was a pure X-multiple provable here --
+// but a deterministic pseudo-out mask is computable by a recipient who owns
+// every token output of the tx, letting them unmask the real ring member
+// from the pseudo-out amount commitment. The balance proof now keeps random
+// pseudo-out masks and proves the residual with linear_composition_proof_s
+// (P = mask_delta*G + secret_x*X) instead. Kept for its unit-test coverage
+// and potential future use.
 struct double_schnorr_sig_s
 {
     rct::key y0;  // response for P0: y0 = r0 - c*s0

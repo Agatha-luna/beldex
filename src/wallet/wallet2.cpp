@@ -2324,6 +2324,39 @@ void wallet2::process_new_transaction(const crypto::hash &txid, const cryptonote
                                   error::wallet_internal_error,
                                   "Sanity check failed: An output replacing a unmined flash output must not be from the pool.");
 
+        // HF21: the sender fully controls the one-time output key, and
+        // consensus does not reject duplicates, so the same key can appear
+        // once as a native BDX output and again as a token output. Amounts
+        // of different assets are incomparable, and the keep/replace logic
+        // below overwrites m_amount/m_mask without touching m_token_id --
+        // which would turn token units into phantom BDX (or the reverse).
+        // Both outputs share one key image, so at most one of them is
+        // spendable anyway: keep the record we already have and ignore the
+        // cross-asset newcomer.
+        if (transfer.m_token_id != tx_scan_info[o].token_id)
+        {
+          LOG_ERROR("Public key " << tools::type_to_hex(kit->first)
+              << " reused across assets: existing "
+              << (transfer.m_token_id != crypto::null_tid ? "token" : "BDX") << " output in tx " << transfer.m_txid
+              << ", incoming " << (tx_scan_info[o].token_id != crypto::null_tid ? "token" : "BDX")
+              << " output in tx " << txid << " ignored");
+
+          auto iter = std::find_if(
+              tx_money_got_in_outs.begin(),
+              tx_money_got_in_outs.end(),
+              [&tx_scan_info,&o](const tx_money_got_in_out& value)
+              {
+                return value.index == tx_scan_info[o].received->index &&
+                  value.amount == tx_scan_info[o].amount &&
+                  value.unlock_time == tx_scan_info[o].unlock_time &&
+                  value.token_id == tx_scan_info[o].token_id;
+              }
+            );
+          THROW_WALLET_EXCEPTION_IF(iter == tx_money_got_in_outs.end(), error::wallet_internal_error, "Could not find the output we just added, this should never happen");
+          tx_money_got_in_outs.erase(iter);
+          continue;
+        }
+
         if (transfer.m_spent || transfer.amount() >= tx_scan_info[o].amount)
         {
           if (transfer.amount() > tx_scan_info[o].amount)
@@ -2452,6 +2485,11 @@ void wallet2::process_new_transaction(const crypto::hash &txid, const cryptonote
             transfer.m_tx = (const cryptonote::transaction_prefix&)tx;
             transfer.m_txid = txid;
             transfer.m_amount = amount;
+            // Same asset (the cross-asset case was rejected above), but the
+            // token-id blinding scalar is per-output, so it must follow the
+            // replacing output along with the amount and mask.
+            transfer.m_token_id   = tx_scan_info[o].token_id;
+            transfer.m_token_mask = tx_scan_info[o].token_mask;
             transfer.m_pk_index = pk_index - 1;
             transfer.m_subaddr_index = tx_scan_info[o].received->index;
             if (should_expand(tx_scan_info[o].received->index))

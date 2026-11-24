@@ -831,6 +831,61 @@ TEST_F(TokenSecurity, TokenFieldsInTxExtraAreInertBeforeTheFork)
   EXPECT_EQ(get_burned_amount_from_tx_extra(plain), 7u);
 }
 
+// The TDO's token_id and amount_commitment, and the zyphora outputs'
+// amount_commitments, are attacker-supplied bytes that reach rct point
+// arithmetic whose decode helpers throw on invalid encodings. Consensus
+// validation must reject such transactions as invalid, never unwind.
+TEST_F(TokenSecurity, MalformedPointsAreRejectedWithoutThrowing)
+{
+  // Bytes that are not a valid point encoding at all.
+  rct::key not_a_point = rct::zero();
+  ge_p3 tmp;
+  while (ge_frombytes_vartime(&tmp, not_a_point.bytes) == 0)
+    ++not_a_point.bytes[0];
+
+  // A valid encoding outside the main subgroup (an order-8 point).
+  rct::key torsion;
+  ASSERT_TRUE(tools::hex_to_type("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", torsion));
+  ASSERT_EQ(ge_frombytes_vartime(&tmp, torsion.bytes), 0);
+  ASSERT_FALSE(rct::isInMainSubgroup(torsion));
+
+  std::string reason;
+  for (const rct::key& bad : {not_a_point, torsion})
+  {
+    // Field-level validation rejects a bad token_id and a bad
+    // amount_commitment outright.
+    auto op = registration;
+    op.operation_type = operation::mint_token;
+    op.fields = token_field_token_id | token_field_amount | token_field_amount_commitment;
+    op.amount = 10;
+    std::memcpy(op.token_id.data, bad.bytes, sizeof(bad.bytes));
+    op.amount_commitment = rct::rct2pk(rct::scalarmultBase(mask));
+    EXPECT_FALSE(validate_token_descriptor_operation(op, reason)) << reason;
+
+    op.token_id = id;
+    std::memcpy(op.amount_commitment.data, bad.bytes, sizeof(bad.bytes));
+    EXPECT_FALSE(validate_token_descriptor_operation(op, reason)) << reason;
+
+    // The same rejection holds through the full db validator (this path threw
+    // before the fields were validated as curve points).
+    transaction tx{};
+    tx.version = txversion::v4_tx_types;
+    tx.type = txtype::mint_token;
+    std::memcpy(op.amount_commitment.data, rct::scalarmultBase(mask).bytes, 32);
+    std::memcpy(op.token_id.data, bad.bytes, sizeof(bad.bytes));
+    ASSERT_TRUE(add_token_descriptor_operation_to_tx_extra(tx.extra, op));
+    EXPECT_NO_THROW(EXPECT_FALSE(validate(tx, reason)) << reason);
+  }
+
+  // Output commitments are only decoded inside verify_token_amount_commitment;
+  // a malformed one must come back as "invalid", not as an exception.
+  auto tx = make_tx(1, false, true, false, [&](transaction& mtx) {
+    auto& z = std::get<tx_out_zyphora>(mtx.vout[1].target);
+    std::memcpy(z.amount_commitment.data, not_a_point.bytes, sizeof(not_a_point.bytes));
+  });
+  EXPECT_NO_THROW(EXPECT_FALSE(validate(tx, reason)) << reason);
+}
+
 // A tx with token outputs may have at most TX_BULLETPROOF_PLUS_MAX_OUTPUTS
 // outputs in total, native and token together.
 TEST(TokenOutputLimit, TooManyOutputsRejectedBeforeAnyProofIsRead)
