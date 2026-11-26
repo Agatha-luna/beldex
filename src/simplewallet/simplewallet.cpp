@@ -9249,9 +9249,13 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
   std::unordered_map<cryptonote::account_public_address, dest_info> dests;
   int first_known_non_zero_change_index = -1;
   std::string payment_id_string = "";
+  // N6: surface the transaction type/operation so a mint, burn or ownership
+  // transfer cannot be presented to the signer as a plain fee-only transfer.
+  std::set<std::string> tx_operations;
   for (size_t n = 0; n < get_num_txes(); ++n)
   {
     const wallet::tx_construction_data &cd = get_tx(n);
+    tx_operations.insert(cryptonote::transaction_prefix::type_to_string(cd.tx_type));
 
     std::vector<tx_extra_field> tx_extra_fields;
     bool has_encrypted_payment_id = false;
@@ -9324,6 +9328,17 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
 
     if (cd.change_dts.amount > 0)
     {
+      // N6: do not trust the (possibly compromised) preparing wallet's claim
+      // that this output is "change". A real change output must resolve to one
+      // of this wallet's own subaddresses; otherwise a payment to a third party
+      // could be subtracted from the displayed amount and shown as change.
+      if (!m_wallet->get_subaddress_index(cd.change_dts.addr))
+      {
+        fail_msg_writer() << tr("Refusing to sign: the claimed change address does not belong to this wallet "
+                                "(a compromised watch-only wallet may be trying to disguise a payment to a third "
+                                "party as your change)");
+        return false;
+      }
       auto it = dests.find(cd.change_dts.addr);
       if (it == dests.end())
       {
@@ -9361,6 +9376,14 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
         auto it = dests.find(cd.change_dts.addr);
         if (it != dests.end())
         {
+          // N6: a token-only transfer can have zero native change, so the
+          // check above may not have run. Re-verify the change address is ours
+          // with our own keys before crediting this token amount as change.
+          if (!m_wallet->get_subaddress_index(cd.change_dts.addr))
+          {
+            fail_msg_writer() << tr("Refusing to sign: the claimed token change address does not belong to this wallet");
+            return false;
+          }
           changes[token_id] += token_change;
           it->second.amounts[token_id] -= token_change;
           if (it->second.amounts[token_id] == 0)
@@ -9433,7 +9456,15 @@ bool simple_wallet::accept_loaded_tx(const std::function<size_t()> get_num_txes,
     total_amounts_str += format_amount_with_token_id(*m_wallet, amt, token_id == crypto::null_tid ? "" : tools::type_to_hex(token_id), true);
   }
   
-  std::string prompt_str = (boost::format(tr("Loaded %lu transactions, for %s, fee %s, %s, %s, with min ring size %lu, %s. %sIs this okay?")) % (unsigned long)get_num_txes() % total_amounts_str % print_money(fee) % dest_string % change_string % (unsigned long)min_ring_size % payment_id_string % extra_message).str();
+  std::string operation_string;
+  for (const auto& op : tx_operations)
+  {
+    if (!operation_string.empty())
+      operation_string += ", ";
+    operation_string += op;
+  }
+
+  std::string prompt_str = (boost::format(tr("Loaded %lu transactions (operation: %s), for %s, fee %s, %s, %s, with min ring size %lu, %s. %sIs this okay?")) % (unsigned long)get_num_txes() % operation_string % total_amounts_str % print_money(fee) % dest_string % change_string % (unsigned long)min_ring_size % payment_id_string % extra_message).str();
   return command_line::is_yes(input_line(prompt_str, true));
 }
 //----------------------------------------------------------------------------------------------------

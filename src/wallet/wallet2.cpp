@@ -8311,19 +8311,55 @@ bool wallet2::sign_tx(unsigned_tx_set &exported_txs, std::vector<wallet2::pendin
       }
     }
 
+    // N6: independently verify, with THIS wallet's own keys, that the outputs
+    // which actually return to us are exactly the ones the preparing (possibly
+    // compromised) wallet claims are ours -- matched by IDENTITY, not by count.
+    // is_out_to_acc_precomp re-derives each output's one-time key and, when it
+    // is ours, reports which subaddress it pays. We require the multiset of
+    // (account, subaddress, is_token, token_id) that cryptographically come back
+    // to us to equal the multiset the construction data marks as ours, then
+    // refuse to sign on any mismatch.
+    //   - Matching by identity (not count) stops an output falsely claimed as
+    //     change from being balanced by an unrelated owned output (self-payment).
+    //   - is_token distinguishes native (txout_to_key) from token (tx_out_zyphora)
+    //     outputs, rejecting a native-vs-token swap at the same subaddress.
+    //   - token_id is the exact asset, un-blinded from the token output with the
+    //     same derivation that proved ownership, rejecting a token-A-claimed /
+    //     token-B-built swap. An undecodable token output keeps a null token_id
+    //     but still carries is_token=true, so it cannot pose as native change.
+    const wallet::tx_construction_data &sd_n = exported_txs.txes[n];
+    const auto tid_key = [](const crypto::token_id &t) { return std::string(t.data, sizeof(t.data)); };
+    std::vector<std::tuple<uint32_t, uint32_t, bool, std::string>> claimed_owned, actual_owned;
+    for (const auto &d : sd_n.splitted_dsts)
+      if (auto idx = get_subaddress_index(d.addr))
+        claimed_owned.emplace_back(idx->major, idx->minor, d.token_id != crypto::null_tid, tid_key(d.token_id));
+
     for (size_t i = 0; i < tx.vout.size(); ++i)
     {
-      if (!std::holds_alternative<cryptonote::txout_to_key>(tx.vout[i].target) &&
-          !std::holds_alternative<cryptonote::tx_out_zyphora>(tx.vout[i].target))
+      const bool is_token_out = std::holds_alternative<cryptonote::tx_out_zyphora>(tx.vout[i].target);
+      if (!std::holds_alternative<cryptonote::txout_to_key>(tx.vout[i].target) && !is_token_out)
         continue;
       crypto::public_key out_key;
-      if (std::holds_alternative<cryptonote::txout_to_key>(tx.vout[i].target))
-        out_key = var::get<cryptonote::txout_to_key>(tx.vout[i].target).key;
-      else
+      if (is_token_out)
         out_key = var::get<cryptonote::tx_out_zyphora>(tx.vout[i].target).stealth_address;
+      else
+        out_key = var::get<cryptonote::txout_to_key>(tx.vout[i].target).key;
       // if this output is back to this wallet, we can calculate its key image already
-      if (!is_out_to_acc_precomp(m_subaddresses, out_key, derivation, additional_derivations, i, hwdev))
+      auto recv_info = is_out_to_acc_precomp(m_subaddresses, out_key, derivation, additional_derivations, i, hwdev);
+      if (!recv_info)
         continue;
+      // Recover the ASSET this owned output actually carries: native -> null_tid,
+      // token -> un-blind with the ownership derivation. An undecodable token
+      // output keeps null_tid and so cannot match a real claimed token.
+      crypto::token_id out_tid = crypto::null_tid;
+      if (is_token_out)
+      {
+        const auto &zout = var::get<cryptonote::tx_out_zyphora>(tx.vout[i].target);
+        uint64_t dec_amount = 0; rct::key dec_amount_mask{}, dec_token_mask{};
+        if (!decode_zyphora_output(keys, zout, recv_info->derivation, i, dec_amount, out_tid, dec_amount_mask, dec_token_mask))
+          out_tid = crypto::null_tid;
+      }
+      actual_owned.emplace_back(recv_info->index.major, recv_info->index.minor, is_token_out, tid_key(out_tid));
       crypto::key_image ki;
       cryptonote::keypair in_ephemeral;
       if (generate_key_image_helper(keys, m_subaddresses, out_key, tx_pub_key, additional_tx_pub_keys, i, in_ephemeral, ki, hwdev))
@@ -8331,6 +8367,13 @@ bool wallet2::sign_tx(unsigned_tx_set &exported_txs, std::vector<wallet2::pendin
       else
         MERROR("Failed to calculate key image");
     }
+
+    std::sort(claimed_owned.begin(), claimed_owned.end());
+    std::sort(actual_owned.begin(), actual_owned.end());
+    THROW_WALLET_EXCEPTION_IF(claimed_owned != actual_owned, error::wallet_internal_error,
+        "Refusing to sign: the outputs that actually return to this wallet (verified with our own key derivation) "
+        "do not match the outputs the preparing wallet claims are ours. A payment to a third party may be disguised "
+        "as your change.");
   }
 
   // add key images
